@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    container_name: multiview-backend
+    ports:
+      - "9292:9292"
+    environment:
+      - PORT=9292
+      - FORCE_CPU=0
+      - M3U_SOURCE=http://host.docker.internal:9191/output/m3u?direct=true
+      - IDLE_TIMEOUT=60
+      - DEFAULT_UA=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
+      - HLS_TIME=2
+      - HLS_LIST_SIZE=10
+    volumes:
+      - ./out:/out
+    restart: unless-stopped
+    # GPU support for NVIDIA hardware encoding
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, video]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build: ./frontend
+    container_name: multiview-frontend
+    ports:
+      - "9393:9393"
+    environment:
+      # API URL is now dynamic (uses window.location.hostname on client side)
+      # No need to hardcode IP - works with localhost and LAN IP automatically
+      - PORT=9393
+      - HOSTNAME=0.0.0.0
+    depends_on:
+      - backend
+    restart: unless-stopped

@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(npx create-next-app:*)",
+      "Bash(npm run build:*)",
+      "Bash(python3:*)",
+      "Bash(chmod:*)",
+      "Bash(docker ps:*)",
+      "Bash(docker exec:*)",
+      "Bash(netstat:*)",
+      "Bash(ss:*)",
+      "Bash(docker logs:*)",
+      "Bash(ip addr:*)",
+      "Read(//mnt/wsl/**)",
+      "Bash(awk:*)",
+      "Bash(cat:*)",
+      "Bash(docker-compose up:*)",
+      "Bash(curl:*)",
+      "Bash(timeout 3 curl -s http://localhost:9292/stream)",
+      "Bash(xxd:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -1,3 +1,8 @@
+# MultiView specific
+.multiview_ip
+out/
+frontend/.env.local
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
