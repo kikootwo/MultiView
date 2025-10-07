@@ -1,4 +1,4 @@
-import os, subprocess, threading, time, signal, pathlib, re, uuid
+import os, subprocess, threading, time, signal, pathlib, re, uuid, asyncio, queue
 from urllib.request import urlopen
 from urllib.error import URLError
 from fastapi import FastAPI, Request, HTTPException
@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse,
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Dict
+from typing import Dict, Set
 
 app = FastAPI()
 
@@ -36,6 +36,9 @@ HLS_LIST_SIZE = os.getenv("HLS_LIST_SIZE", "8")
 HLS_DELETE_THRESHOLD = os.getenv("HLS_DELETE_THRESHOLD", "2")
 FONT = os.getenv("FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
 M3U_SOURCE = os.getenv("M3U_SOURCE", "http://127.0.0.1:9191/output/m3u?direct=true")
+# Stream file size limit (in bytes) - restart FFmpeg when exceeded
+# Default: 500MB to prevent unbounded growth
+MAX_STREAM_SIZE = int(os.getenv("MAX_STREAM_SIZE", str(500 * 1024 * 1024)))
 # ------------------------------------------------
 
 PROC = None
@@ -44,6 +47,7 @@ LAST_HIT = 0.0
 MODE = "black"  # "black" or "live"
 CUR_IN1 = None
 CUR_IN2 = None
+CUR_AUDIO_MODE = 0  # Audio mode used for current stream
 
 # Channel storage (in-memory)
 CHANNELS = []
@@ -52,6 +56,10 @@ CHANNELS_LOCK = threading.Lock()
 # Current layout configuration
 CURRENT_LAYOUT = None
 CURRENT_LAYOUT_LOCK = threading.Lock()
+
+# Broadcast system for streaming to multiple clients
+BROADCAST_CLIENTS: Set[queue.Queue] = set()
+BROADCAST_LOCK = threading.Lock()
 
 # Pydantic models for API
 class LayoutConfigModel(BaseModel):
@@ -64,7 +72,7 @@ app.mount("/hls", StaticFiles(directory=OUTDIR), name="hls")
 @app.middleware("http")
 async def touch_last_hit(request: Request, call_next):
     global LAST_HIT
-    if request.url.path.startswith("/hls"):
+    if request.url.path.startswith("/hls") or request.url.path == "/stream":
         LAST_HIT = time.time()
     return await call_next(request)
 
@@ -205,16 +213,16 @@ def _gpu_or_cpu_parts():
 
 def _output_parts():
     """
-    Output MPEG-TS stream to file for HTTP streaming to Plex.
-    Using file-based approach allows multiple concurrent clients.
+    Output MPEG-TS to stdout for broadcasting to multiple HTTP clients.
+    This mimics HDHomeRun behavior - each client starts at the live point.
     """
     return [
         "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
         "-fflags", "+genpts",
         "-flags", "low_delay",
         "-f", "mpegts",
-        "-mpegts_flags", "resend_headers",
-        f"{OUTDIR}/stream.ts"
+        "-mpegts_copyts", "0",
+        "pipe:1"  # Output to stdout
     ]
 
 def build_black_cmd():
@@ -287,14 +295,20 @@ def clean_outdir():
         except: pass
 
 def start_black():
-    global PROC, LAST_HIT, MODE, CUR_IN1, CUR_IN2, CURRENT_LAYOUT
+    global PROC, LAST_HIT, MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, CURRENT_LAYOUT
     with LOCK:
         stop_ffmpeg()
         clean_outdir()
-        # Output to file - no need to capture stdout
-        PROC = subprocess.Popen(build_black_cmd())
+        # Capture stdout for broadcasting to HTTP clients
+        PROC = subprocess.Popen(
+            build_black_cmd(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0
+        )
         MODE = "black"
         CUR_IN1 = CUR_IN2 = None
+        CUR_AUDIO_MODE = 0
         LAST_HIT = time.time()
     # Clear current layout when stopping
     with CURRENT_LAYOUT_LOCK:
@@ -305,8 +319,13 @@ def start_live(in1: str, in2: str):
     with LOCK:
         stop_ffmpeg()
         clean_outdir()
-        # Output to file - no need to capture stdout
-        PROC = subprocess.Popen(build_live_cmd(in1, in2, AUDIO_SOURCE))
+        # Capture stdout for broadcasting to HTTP clients
+        PROC = subprocess.Popen(
+            build_live_cmd(in1, in2, AUDIO_SOURCE),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0
+        )
         MODE = "live"
         CUR_IN1, CUR_IN2 = in1, in2
         LAST_HIT = time.time()
@@ -315,15 +334,84 @@ def ensure_running():
     if not (PROC and PROC.poll() is None):
         start_black()
 
+def restart_current_stream():
+    """Restart FFmpeg with the same settings to prevent file size growth."""
+    global MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, PROC, LAST_HIT
+    if MODE == "black":
+        start_black()
+    elif MODE == "live" and CUR_IN1 and CUR_IN2:
+        # Restart with saved audio mode to preserve layout configuration
+        with LOCK:
+            stop_ffmpeg()
+            clean_outdir()
+            PROC = subprocess.Popen(
+                build_live_cmd(CUR_IN1, CUR_IN2, CUR_AUDIO_MODE),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0
+            )
+            MODE = "live"
+            LAST_HIT = time.time()
+
 def idle_watchdog():
     global MODE
     while True:
         time.sleep(5)
         ensure_running()
+
+        # Check idle timeout
         if MODE == "live" and (time.time() - LAST_HIT > IDLE_TIMEOUT):
             start_black()
 
+        # Note: HLS segments auto-delete old content, no file size monitoring needed
+
+def broadcast_reader():
+    """
+    Background task that reads from FFmpeg stdout and broadcasts to all connected clients.
+    Runs in a separate thread.
+    """
+    global PROC, BROADCAST_CLIENTS
+
+    while True:
+        if PROC and PROC.stdout and PROC.poll() is None:
+            try:
+                # Read chunk from FFmpeg stdout
+                # MPEG-TS packets are 188 bytes, read multiples for efficiency
+                chunk = PROC.stdout.read(188 * 20)  # 3760 bytes
+
+                if chunk:
+                    # Broadcast to all connected clients
+                    with BROADCAST_LOCK:
+                        dead_clients = []
+                        for client_queue in BROADCAST_CLIENTS.copy():
+                            try:
+                                # Non-blocking put with size limit to prevent memory issues
+                                if client_queue.qsize() < 100:  # Max 100 chunks buffered
+                                    client_queue.put_nowait(chunk)
+                                else:
+                                    # Client is too slow, disconnect them
+                                    dead_clients.append(client_queue)
+                            except queue.Full:
+                                dead_clients.append(client_queue)
+                            except Exception as e:
+                                print(f"Error broadcasting to client: {e}")
+                                dead_clients.append(client_queue)
+
+                        # Remove dead clients
+                        for dead in dead_clients:
+                            BROADCAST_CLIENTS.discard(dead)
+                else:
+                    # No data, wait a bit
+                    time.sleep(0.01)
+            except Exception as e:
+                print(f"Broadcast reader error: {e}")
+                time.sleep(0.1)
+        else:
+            # No active process, wait
+            time.sleep(0.5)
+
 threading.Thread(target=idle_watchdog, daemon=True).start()
+threading.Thread(target=broadcast_reader, daemon=True).start()
 
 @app.on_event("startup")
 def boot():
@@ -384,60 +472,46 @@ async def status():
 @app.get("/stream")
 async def stream():
     """
-    Stream MPEG-TS from file for Plex LiveTV.
-    Continuously reads from stream.ts as FFmpeg writes to it.
+    HDHomeRun-style MPEG-TS streaming.
+    Each client starts receiving from the current live point.
     Multiple clients can connect simultaneously.
     """
-    global PROC, LAST_HIT
-
-    # Touch last hit to prevent idle timeout during streaming
+    global LAST_HIT, BROADCAST_CLIENTS
     LAST_HIT = time.time()
 
-    def generate():
-        """
-        Generator that yields MPEG-TS chunks as they're written to file.
-        When layout changes, file is deleted and client will disconnect.
-        VLC/Plex will automatically reconnect and get the new layout.
-        """
+    # Create a queue for this client (threading.Queue, not asyncio)
+    client_queue = queue.Queue(maxsize=100)
+
+    # Register this client with the broadcaster
+    with BROADCAST_LOCK:
+        BROADCAST_CLIENTS.add(client_queue)
+
+    async def generate():
         global LAST_HIT
-        stream_path = pathlib.Path(OUTDIR) / "stream.ts"
-
-        # Wait for file to be created (up to 10 seconds)
-        for _ in range(100):
-            if stream_path.exists() and stream_path.stat().st_size > 0:
-                break
-            time.sleep(0.1)
-        else:
-            print("Stream file not created")
-            return
-
-        chunk_size = 188 * 100  # MPEG-TS packets are 188 bytes
-
         try:
-            with open(stream_path, 'rb') as f:
-                while True:
-                    chunk = f.read(chunk_size)
-                    if chunk:
-                        LAST_HIT = time.time()
-                        yield chunk
-                    else:
-                        # No new data available yet
-                        # Check if file still exists (layout change deletes it)
-                        if not stream_path.exists():
-                            print("Stream file deleted (layout change)")
-                            return
-                        # Check if FFmpeg is still running
-                        if PROC is None or PROC.poll() is not None:
-                            print("FFmpeg stopped")
-                            return
-                        # Wait for more data to be written
-                        time.sleep(0.05)
-        except FileNotFoundError:
-            print("Stream file deleted during read")
-            return
+            while True:
+                # Wait for data from the broadcaster (blocking with timeout)
+                try:
+                    # Use run_in_executor to make blocking queue.get() non-blocking for asyncio
+                    loop = asyncio.get_event_loop()
+                    chunk = await loop.run_in_executor(
+                        None,
+                        lambda: client_queue.get(timeout=1.0)
+                    )
+                    # Update LAST_HIT to prevent idle timeout while client is actively streaming
+                    LAST_HIT = time.time()
+                    yield chunk
+                except queue.Empty:
+                    # No data for 1 second, check if process is still alive
+                    if not PROC or PROC.poll() is not None:
+                        break
+                    continue
         except Exception as e:
-            print(f"Streaming error: {e}")
-            return
+            print(f"Client stream error: {e}")
+        finally:
+            # Unregister this client
+            with BROADCAST_LOCK:
+                BROADCAST_CLIENTS.discard(client_queue)
 
     return StreamingResponse(
         generate(),
@@ -445,8 +519,6 @@ async def stream():
         headers={
             "Content-Type": "video/mp2t",
             "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
             "Connection": "keep-alive",
         }
     )
@@ -524,13 +596,19 @@ async def set_layout(config: LayoutConfigModel):
     # Start the stream
     try:
         # Use existing start_live function with main as IN1, inset as IN2
-        global PROC, LAST_HIT, MODE, CUR_IN1, CUR_IN2
+        global PROC, LAST_HIT, MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE
         with LOCK:
             stop_ffmpeg()
             clean_outdir()
-            PROC = subprocess.Popen(build_live_cmd(main_url, inset_url, audio_mode))
+            PROC = subprocess.Popen(
+                build_live_cmd(main_url, inset_url, audio_mode),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0
+            )
             MODE = "live"
             CUR_IN1, CUR_IN2 = main_url, inset_url
+            CUR_AUDIO_MODE = audio_mode
             LAST_HIT = time.time()
 
         # Store current layout config

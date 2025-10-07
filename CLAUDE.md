@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-**MultiView** is a Python-based FastAPI service that provides real-time multi-stream video composition using FFmpeg, delivering a single HLS output stream.
+**MultiView** is a Python-based FastAPI service that provides real-time multi-stream video composition using FFmpeg, delivering a single MPEG-TS output stream optimized for Plex LiveTV.
 
 ### Current State
 **Backend (Proof of Concept - Working ✓)**:
@@ -48,7 +48,7 @@ A **mobile-friendly web interface** for household use that allows users to:
 - **Video Processing**: FFmpeg 6.1 with NVIDIA NVENC (h264_nvenc)
 - **Hardware**: NVIDIA RTX 3090 GPU + 24-core CPU
 - **Container**: Docker with NVIDIA Container Toolkit
-- **Streaming Protocol**: HLS (HTTP Live Streaming)
+- **Streaming Protocol**: MPEG-TS over HTTP (continuous streaming)
 - **Server**: Uvicorn ASGI server
 - **Channel Source**: M3U playlist (local or remote URL)
 
@@ -369,12 +369,12 @@ IN2 (pip)  → scale to INSET_SCALE → add 8px white border → [pip]
 - GOP size: 60 frames (2 seconds)
 - Audio: AAC 128k, 48kHz, stereo
 
-### HLS Configuration
-- Segment duration: 1 second (configurable)
-- Playlist size: 8 segments (configurable)
-- Delete threshold: 2 (configurable)
-- Flags: delete_segments, omit_endlist, independent_segments, temp_file
-- Output: `/out/multiview.m3u8`
+### Streaming Configuration
+- Format: MPEG-TS (continuous stream)
+- Output: `/out/stream.ts`
+- Endpoint: `/stream` (HTTP streaming response)
+- Max file size: 500MB (auto-restart when exceeded)
+- Client compatibility: VLC, Plex LiveTV, most IPTV players
 
 ## Configuration (Environment Variables)
 
@@ -394,6 +394,7 @@ IN2 (pip)  → scale to INSET_SCALE → add 8px white border → [pip]
 | `FONT` | DejaVuSans.ttf | Font file path for text rendering |
 | `PORT` | 9292 | HTTP server port |
 | `M3U_SOURCE` | http://127.0.0.1:9191/output/m3u?direct=true | URL or file path to M3U playlist |
+| `MAX_STREAM_SIZE` | 524288000 (500MB) | Maximum stream.ts file size before automatic restart |
 
 ## API Endpoints
 
@@ -470,10 +471,17 @@ IN2 (pip)  → scale to INSET_SCALE → add 8px white border → [pip]
 - Global state variables: `PROC`, `MODE`, `CUR_IN1`, `CUR_IN2`, `LAST_HIT`
 
 ### Idle Timeout Mechanism
-- Middleware tracks `/hls/*` requests and updates `LAST_HIT`
+- Middleware tracks `/stream` requests and updates `LAST_HIT`
 - Watchdog thread monitors time since last hit
 - If `IDLE_TIMEOUT` exceeded in live mode → switch to black mode
 - Prevents resource waste when no one is watching
+
+### File Size Management
+- Watchdog thread monitors `stream.ts` file size every 5 seconds
+- When file exceeds `MAX_STREAM_SIZE` (default 500MB) → FFmpeg automatically restarts
+- Restart preserves current mode and inputs (seamless for clients)
+- Prevents unbounded disk usage from continuous MPEG-TS output
+- VLC/Plex clients auto-reconnect during restart (brief 1-3 second interruption)
 
 ## Important Implementation Details
 
