@@ -1,19 +1,22 @@
 'use client';
 
 import { Channel } from '@/types';
-import Image from 'next/image';
 import { useState } from 'react';
 
 interface ChannelListProps {
   channels: Channel[];
   onChannelSelect: (channel: Channel) => void;
   selectedChannelId?: string | null;
+  onRefresh?: () => void;
+  isRefreshing?: boolean;
 }
 
 export default function ChannelList({
   channels,
   onChannelSelect,
   selectedChannelId,
+  onRefresh,
+  isRefreshing = false,
 }: ChannelListProps) {
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -21,57 +24,85 @@ export default function ChannelList({
     channel.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  // Get proxied image URL to work around Docker internal hostnames
+  const getImageUrl = (iconUrl: string | undefined): string | null => {
+    if (!iconUrl) return null;
+    // If browser-accessible, use directly
+    if (iconUrl.startsWith('http://') && !iconUrl.includes('host.docker.internal')) {
+      return iconUrl;
+    }
+    // Otherwise proxy through backend
+    const apiUrl = typeof window !== 'undefined'
+      ? `http://${window.location.hostname}:9292`
+      : 'http://localhost:9292';
+    return `${apiUrl}/api/proxy-image?url=${encodeURIComponent(iconUrl)}`;
+  };
+
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full overflow-hidden">
+      {/* Refresh button */}
+      {onRefresh && (
+        <div className="p-4 border-b border-card-border flex-shrink-0">
+          <button
+            onClick={onRefresh}
+            disabled={isRefreshing}
+            className="w-full px-4 py-2.5 bg-gradient-to-r from-primary to-accent hover:from-primary-hover hover:to-primary text-white font-medium rounded-lg disabled:opacity-50 transition-all shadow-md hover:shadow-lg flex items-center justify-center gap-2"
+          >
+            <span className={isRefreshing ? 'animate-spin' : ''}>🔄</span>
+            {isRefreshing ? 'Refreshing...' : 'Refresh Channels'}
+          </button>
+        </div>
+      )}
+
       {/* Search bar */}
-      <div className="p-4 border-b border-gray-200">
+      <div className="p-4 border-b border-card-border flex-shrink-0">
         <input
           type="text"
-          placeholder="Search channels..."
+          placeholder="🔍 Search channels..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="w-full px-4 py-2 bg-background border border-card-border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary transition-all text-foreground placeholder:text-muted"
         />
       </div>
 
       {/* Channel list */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto min-h-0">
         {filteredChannels.length === 0 ? (
-          <div className="flex items-center justify-center h-32 text-gray-500">
+          <div className="flex items-center justify-center h-32 text-muted">
             No channels found
           </div>
         ) : (
-          <div className="grid grid-cols-1 gap-2 p-4">
+          <div className="divide-y divide-card-border">
             {filteredChannels.map((channel) => (
               <button
                 key={channel.id}
                 onClick={() => onChannelSelect(channel)}
-                className={`flex items-center gap-3 p-3 rounded-lg border-2 transition-all hover:bg-blue-50 ${
+                className={`w-full flex items-center gap-3 p-3 transition-all hover:bg-primary hover:bg-opacity-5 hover:shadow-sm ${
                   selectedChannelId === channel.id
-                    ? 'border-blue-500 bg-blue-50'
-                    : 'border-gray-200'
+                    ? 'bg-primary bg-opacity-10 shadow-sm'
+                    : ''
                 }`}
               >
                 {/* Channel icon */}
-                <div className="relative w-12 h-12 flex-shrink-0 bg-gray-100 rounded overflow-hidden">
-                  {channel.icon ? (
-                    <Image
-                      src={channel.icon}
+                <div className="w-10 h-10 flex-shrink-0 bg-background rounded overflow-hidden flex items-center justify-center border border-card-border">
+                  {getImageUrl(channel.icon) ? (
+                    <img
+                      src={getImageUrl(channel.icon)!}
                       alt={channel.name}
-                      fill
-                      className="object-cover"
-                      unoptimized // For external URLs
+                      className="w-full h-full object-cover"
+                      onError={(e) => {
+                        // Hide broken images
+                        e.currentTarget.style.display = 'none';
+                      }}
                     />
                   ) : (
-                    <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">
-                      No Icon
-                    </div>
+                    <div className="text-muted text-xs">📺</div>
                   )}
                 </div>
 
                 {/* Channel name */}
                 <div className="flex-1 text-left">
-                  <div className="font-medium text-gray-900">{channel.name}</div>
+                  <div className="font-medium text-foreground">{channel.name}</div>
                 </div>
               </button>
             ))}

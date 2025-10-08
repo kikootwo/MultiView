@@ -14,10 +14,7 @@ export type LayoutType =
   | 'multi_pip_4'   // 1 main + 4 small insets
   | 'split_h'       // 2 streams side-by-side (horizontal)
   | 'split_v'       // 2 streams top/bottom (vertical)
-  | 'grid_2x2'      // 4 streams in 2x2 grid
-  | 'grid_3x3'      // 9 streams in 3x3 grid (max 5 used)
-  | 'grid_2x1'      // 2 streams horizontal
-  | 'grid_1x2';     // 2 streams vertical
+  | 'grid_2x2';     // 4 streams in 2x2 grid
 
 export interface LayoutSlot {
   slotId: string;

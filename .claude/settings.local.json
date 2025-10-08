@@ -21,7 +21,8 @@
       "Bash(xxd:*)",
       "Bash(docker-compose:*)",
       "Read(//tmp/**)",
-      "Bash(timeout 2 curl -s http://localhost:9292/stream)"
+      "Bash(timeout 2 curl -s http://localhost:9292/stream)",
+      "Bash(ls:*)"
     ],
     "deny": [],
     "ask": []

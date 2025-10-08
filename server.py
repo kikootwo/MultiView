@@ -1,8 +1,8 @@
 import os, subprocess, threading, time, signal, pathlib, re, uuid, asyncio, queue
-from urllib.request import urlopen
+from urllib.request import urlopen, Request as UrlRequest
 from urllib.error import URLError
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -47,7 +47,11 @@ LAST_HIT = 0.0
 MODE = "black"  # "black" or "live"
 CUR_IN1 = None
 CUR_IN2 = None
-CUR_AUDIO_MODE = 0  # Audio mode used for current stream
+CUR_AUDIO_MODE = 0  # Audio mode used for current stream (legacy)
+# New layout system globals
+CUR_LAYOUT = None  # Current layout type
+CUR_INPUTS = []  # List of input URLs in slot order
+CUR_AUDIO_INDEX = 0  # Index of input providing audio
 
 # Channel storage (in-memory)
 CHANNELS = []
@@ -145,6 +149,9 @@ def parse_m3u(content: str):
                     # Prefer tvg-name, fall back to display_name
                     name = tvg_name if tvg_name else display_name
 
+                    if name == "MultiView":
+                        continue
+
                     channels.append({
                         "id": channel_id,
                         "name": name,
@@ -238,8 +245,64 @@ def build_black_cmd():
 
 
 def build_live_cmd(in1: str, in2: str, audio_mode: int):
-    # Base + inset (with 8px white border via pad)
-    pip_graph = (
+    # Legacy function for backward compatibility - delegates to build_layout_cmd
+    return build_layout_cmd('pip', [in1, in2], audio_mode)
+
+def build_layout_cmd(layout: str, input_urls: list, audio_index: int):
+    """
+    Build FFmpeg command for any layout type.
+
+    Args:
+        layout: Layout type ('pip', 'split_h', 'split_v', 'grid_2x2', 'multi_pip_2', 'multi_pip_3', 'multi_pip_4')
+        input_urls: List of input stream URLs (in slot order)
+        audio_index: Index of input to use for audio (0-based)
+    """
+    # Build filter_complex based on layout
+    if layout == 'pip':
+        fc = build_pip_filter(input_urls)
+    elif layout == 'split_h':
+        fc = build_split_h_filter(input_urls)
+    elif layout == 'split_v':
+        fc = build_split_v_filter(input_urls)
+    elif layout == 'grid_2x2':
+        fc = build_grid_2x2_filter(input_urls)
+    elif layout == 'multi_pip_2':
+        fc = build_multi_pip_2_filter(input_urls)
+    elif layout == 'multi_pip_3':
+        fc = build_multi_pip_3_filter(input_urls)
+    elif layout == 'multi_pip_4':
+        fc = build_multi_pip_4_filter(input_urls)
+    else:
+        raise ValueError(f"Unknown layout type: {layout}")
+
+    # Build audio mapping
+    amap = ["-map", "[v]", "-map", f"{audio_index}:a?"]
+
+    # Build ffmpeg command with all inputs
+    cmd = ["ffmpeg", "-loglevel", "warning", "-hide_banner", "-nostdin"]
+
+    # Add each input with reconnection options
+    for url in input_urls:
+        cmd += [
+            "-thread_queue_size", "1024", "-user_agent", DEFAULT_UA,
+        ]
+        if SOURCE_HEADERS.strip():
+            cmd += ["-headers", _headers_value()]
+        cmd += [
+            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1",
+            "-rw_timeout", "15000000", "-timeout", "15000000",
+            "-i", url,
+        ]
+
+    # Add filter_complex and audio mapping
+    cmd += ["-filter_complex", fc]
+    cmd += amap + _gpu_or_cpu_parts() + _output_parts()
+
+    return cmd
+
+def build_pip_filter(inputs: list) -> str:
+    """Picture-in-Picture: 1 main + 1 inset"""
+    return (
         "[0:v]fps=30,scale=1920:-2:force_original_aspect_ratio=decrease,"
         "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[base];"
         f"[1:v]scale={INSET_SCALE}:-2:force_original_aspect_ratio=decrease,setsar=1,"
@@ -247,35 +310,100 @@ def build_live_cmd(in1: str, in2: str, audio_mode: int):
         f"[base][pip]overlay=W-w-{INSET_MARGIN}:H-h-{INSET_MARGIN}:shortest=1[v]"
     )
 
-    fc = pip_graph
-    amap = ["-map","[v]","-map","0:a?"]  # default audio from IN1
-    if audio_mode == 1:
-        amap = ["-map","[v]","-map","1:a?"]  # audio from IN2
-    elif audio_mode == 2:
-        # mix both
-        fc = pip_graph + ";[0:a]aresample=async=1:first_pts=0[a0];[1:a]aresample=async=1:first_pts=0[a1];[a0][a1]amix=inputs=2:normalize=1[a]"
-        amap = ["-map","[v]","-map","[a]"]
+def build_split_h_filter(inputs: list) -> str:
+    """Split Horizontal: 2 streams side-by-side"""
+    return (
+        "[0:v]fps=30,scale=960:-2:force_original_aspect_ratio=decrease,"
+        "pad=960:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[left];"
+        "[1:v]fps=30,scale=960:-2:force_original_aspect_ratio=decrease,"
+        "pad=960:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[right];"
+        "[left][right]hstack=inputs=2:shortest=0[v]"
+    )
 
-    cmd = [
-        "ffmpeg","-loglevel","warning","-hide_banner","-nostdin",
-        "-thread_queue_size","1024","-user_agent",DEFAULT_UA,
-    ]
-    if SOURCE_HEADERS.strip(): cmd += ["-headers", _headers_value()]
-    cmd += [
-        "-reconnect","1","-reconnect_streamed","1","-reconnect_on_network_error","1",
-        "-rw_timeout","15000000","-timeout","15000000",
-        "-i", in1,
-        "-thread_queue_size","1024","-user_agent",DEFAULT_UA,
-    ]
-    if SOURCE_HEADERS.strip(): cmd += ["-headers", _headers_value()]
-    cmd += [
-        "-reconnect","1","-reconnect_streamed","1","-reconnect_on_network_error","1",
-        "-rw_timeout","15000000","-timeout","15000000",
-        "-i", in2,
-        "-filter_complex", fc,
-    ]
-    cmd += amap + _gpu_or_cpu_parts() + _output_parts()
-    return cmd
+def build_split_v_filter(inputs: list) -> str:
+    """Split Vertical: 2 streams stacked"""
+    return (
+        "[0:v]fps=30,scale=1920:540:force_original_aspect_ratio=decrease,"
+        "pad=1920:540:(ow-iw)/2:(oh-ih)/2,setsar=1[top];"
+        "[1:v]fps=30,scale=1920:540:force_original_aspect_ratio=decrease,"
+        "pad=1920:540:(ow-iw)/2:(oh-ih)/2,setsar=1[bottom];"
+        "[top][bottom]vstack=inputs=2:shortest=0[v]"
+    )
+
+def build_grid_2x2_filter(inputs: list) -> str:
+    """2x2 Grid: 4 equal streams"""
+    return (
+        "[0:v]fps=30,scale=960:-2:force_original_aspect_ratio=decrease,"
+        "pad=960:540:(ow-iw)/2:(oh-ih)/2,setsar=1[s0];"
+        "[1:v]fps=30,scale=960:-2:force_original_aspect_ratio=decrease,"
+        "pad=960:540:(ow-iw)/2:(oh-ih)/2,setsar=1[s1];"
+        "[2:v]fps=30,scale=960:-2:force_original_aspect_ratio=decrease,"
+        "pad=960:540:(ow-iw)/2:(oh-ih)/2,setsar=1[s2];"
+        "[3:v]fps=30,scale=960:-2:force_original_aspect_ratio=decrease,"
+        "pad=960:540:(ow-iw)/2:(oh-ih)/2,setsar=1[s3];"
+        "[s0][s1]hstack:shortest=0[top];"
+        "[s2][s3]hstack:shortest=0[bottom];"
+        "[top][bottom]vstack:shortest=0[v]"
+    )
+
+def build_multi_pip_2_filter(inputs: list) -> str:
+    """Multi-PiP (2): 1 main + 2 small insets"""
+    inset_w = 480
+    inset_h = 270
+    margin = 20
+    return (
+        "[0:v]fps=30,scale=1920:-2:force_original_aspect_ratio=decrease,"
+        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[base];"
+        f"[1:v]fps=30,scale={inset_w}:-2:force_original_aspect_ratio=decrease,setsar=1,"
+        f"pad={inset_w+8}:{inset_h+8}:4:4:color=white[pip1];"
+        f"[2:v]fps=30,scale={inset_w}:-2:force_original_aspect_ratio=decrease,setsar=1,"
+        f"pad={inset_w+8}:{inset_h+8}:4:4:color=white[pip2];"
+        f"[base][pip1]overlay=W-w-{margin}:H-h-{margin}:shortest=0[tmp];"
+        f"[tmp][pip2]overlay=W-w-{margin}:H-h-{margin}-{inset_h+8+10}:shortest=0[v]"
+    )
+
+def build_multi_pip_3_filter(inputs: list) -> str:
+    """Multi-PiP (3): 1 main + 3 small insets"""
+    inset_w = 384
+    inset_h = 216
+    margin = 20
+    gap = 10
+    return (
+        "[0:v]fps=30,scale=1920:-2:force_original_aspect_ratio=decrease,"
+        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[base];"
+        f"[1:v]fps=30,scale={inset_w}:-2:force_original_aspect_ratio=decrease,setsar=1,"
+        f"pad={inset_w+8}:{inset_h+8}:4:4:color=white[pip1];"
+        f"[2:v]fps=30,scale={inset_w}:-2:force_original_aspect_ratio=decrease,setsar=1,"
+        f"pad={inset_w+8}:{inset_h+8}:4:4:color=white[pip2];"
+        f"[3:v]fps=30,scale={inset_w}:-2:force_original_aspect_ratio=decrease,setsar=1,"
+        f"pad={inset_w+8}:{inset_h+8}:4:4:color=white[pip3];"
+        f"[base][pip1]overlay=W-w-{margin}:H-h-{margin}:shortest=0[tmp1];"
+        f"[tmp1][pip2]overlay=W-w-{margin}:H-h-{margin}-{inset_h+8+gap}:shortest=0[tmp2];"
+        f"[tmp2][pip3]overlay=W-w-{margin}:H-h-{margin}-2*({inset_h+8+gap}):shortest=0[v]"
+    )
+
+def build_multi_pip_4_filter(inputs: list) -> str:
+    """Multi-PiP (4): 1 main + 4 small insets"""
+    inset_w = 384
+    inset_h = 216
+    margin = 20
+    gap = 10
+    return (
+        "[0:v]fps=30,scale=1920:-2:force_original_aspect_ratio=decrease,"
+        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[base];"
+        f"[1:v]fps=30,scale={inset_w}:-2:force_original_aspect_ratio=decrease,setsar=1,"
+        f"pad={inset_w+8}:{inset_h+8}:4:4:color=white[pip1];"
+        f"[2:v]fps=30,scale={inset_w}:-2:force_original_aspect_ratio=decrease,setsar=1,"
+        f"pad={inset_w+8}:{inset_h+8}:4:4:color=white[pip2];"
+        f"[3:v]fps=30,scale={inset_w}:-2:force_original_aspect_ratio=decrease,setsar=1,"
+        f"pad={inset_w+8}:{inset_h+8}:4:4:color=white[pip3];"
+        f"[4:v]fps=30,scale={inset_w}:-2:force_original_aspect_ratio=decrease,setsar=1,"
+        f"pad={inset_w+8}:{inset_h+8}:4:4:color=white[pip4];"
+        f"[base][pip1]overlay=W-w-{margin}:H-h-{margin}:shortest=0[tmp1];"
+        f"[tmp1][pip2]overlay=W-w-{margin}:H-h-{margin}-{inset_h+8+gap}:shortest=0[tmp2];"
+        f"[tmp2][pip3]overlay=W-w-{margin}:{margin}:shortest=0[tmp3];"
+        f"[tmp3][pip4]overlay=W-w-{margin}:{margin}+{inset_h+8+gap}:shortest=0[v]"
+    )
 
 def stop_ffmpeg():
     global PROC
@@ -295,7 +423,7 @@ def clean_outdir():
         except: pass
 
 def start_black():
-    global PROC, LAST_HIT, MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, CURRENT_LAYOUT
+    global PROC, LAST_HIT, MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CURRENT_LAYOUT
     with LOCK:
         stop_ffmpeg()
         clean_outdir()
@@ -309,6 +437,9 @@ def start_black():
         MODE = "black"
         CUR_IN1 = CUR_IN2 = None
         CUR_AUDIO_MODE = 0
+        CUR_LAYOUT = None
+        CUR_INPUTS = []
+        CUR_AUDIO_INDEX = 0
         LAST_HIT = time.time()
     # Clear current layout when stopping
     with CURRENT_LAYOUT_LOCK:
@@ -336,22 +467,36 @@ def ensure_running():
 
 def restart_current_stream():
     """Restart FFmpeg with the same settings to prevent file size growth."""
-    global MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, PROC, LAST_HIT
+    global MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, PROC, LAST_HIT
     if MODE == "black":
         start_black()
-    elif MODE == "live" and CUR_IN1 and CUR_IN2:
-        # Restart with saved audio mode to preserve layout configuration
-        with LOCK:
-            stop_ffmpeg()
-            clean_outdir()
-            PROC = subprocess.Popen(
-                build_live_cmd(CUR_IN1, CUR_IN2, CUR_AUDIO_MODE),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0
-            )
-            MODE = "live"
-            LAST_HIT = time.time()
+    elif MODE == "live":
+        # Use new layout system if available, otherwise fall back to legacy
+        if CUR_LAYOUT and CUR_INPUTS:
+            with LOCK:
+                stop_ffmpeg()
+                clean_outdir()
+                PROC = subprocess.Popen(
+                    build_layout_cmd(CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=0
+                )
+                MODE = "live"
+                LAST_HIT = time.time()
+        elif CUR_IN1 and CUR_IN2:
+            # Legacy restart
+            with LOCK:
+                stop_ffmpeg()
+                clean_outdir()
+                PROC = subprocess.Popen(
+                    build_live_cmd(CUR_IN1, CUR_IN2, CUR_AUDIO_MODE),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=0
+                )
+                MODE = "live"
+                LAST_HIT = time.time()
 
 def idle_watchdog():
     global MODE
@@ -460,12 +605,29 @@ async def control_swap():
 async def status():
     running = PROC is not None and PROC.poll() is None
     port = os.getenv('PORT', '9292')
+
+    # Get connected client count
+    with BROADCAST_LOCK:
+        client_count = len(BROADCAST_CLIENTS)
+
+    # Calculate time until idle timeout
+    time_since_hit = time.time() - LAST_HIT
+    time_until_timeout = max(0, IDLE_TIMEOUT - time_since_hit)
+
+    # Get current layout
+    with CURRENT_LAYOUT_LOCK:
+        current_layout = CURRENT_LAYOUT.copy() if CURRENT_LAYOUT else None
+
     return {
         "proc_running": running,
         "mode": MODE,
-        "in1": CUR_IN1, "in2": CUR_IN2,
+        "in1": CUR_IN1,
+        "in2": CUR_IN2,
         "idle_timeout_sec": IDLE_TIMEOUT,
         "last_hit_epoch": LAST_HIT,
+        "time_until_idle": int(time_until_timeout),
+        "connected_clients": client_count,
+        "current_layout": current_layout,
         "stream_url": f"http://localhost:{port}/stream",
     }
 
@@ -545,6 +707,24 @@ async def refresh_channels():
             "message": "Channels refreshed successfully",
         }
 
+@app.get("/api/proxy-image")
+async def proxy_image(url: str):
+    """
+    Proxy channel icons from internal Docker networks to the frontend.
+    This allows browser clients to access images at host.docker.internal URLs.
+    """
+    try:
+        # Fetch the image from the internal URL
+        req = UrlRequest(url, headers={'User-Agent': DEFAULT_UA})
+        with urlopen(req, timeout=5) as response:
+            image_data = response.read()
+            content_type = response.headers.get('Content-Type', 'image/jpeg')
+
+        return Response(content=image_data, media_type=content_type)
+    except Exception as e:
+        print(f"Error proxying image {url}: {e}")
+        raise HTTPException(status_code=404, detail="Image not found")
+
 # ========== Layout Management API ==========
 
 def get_channel_by_id(channel_id: str) -> dict | None:
@@ -560,55 +740,75 @@ async def set_layout(config: LayoutConfigModel):
     """
     Set layout configuration and start streaming.
 
-    For PiP layout, expects:
-    - streams: { 'main': 'channel-id', 'inset': 'channel-id' }
-    - audio_source: 'main' or 'inset'
+    Supports all layout types: pip, split_h, split_v, grid_2x2, multi_pip_2, multi_pip_3, multi_pip_4
+
+    Expects:
+    - layout: Layout type string
+    - streams: { slotId: channelId } mapping
+    - audio_source: slotId providing audio
     """
-    global CURRENT_LAYOUT
+    global CURRENT_LAYOUT, PROC, LAST_HIT, MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX
+
+    # Define slot order for each layout type (must match filter builders)
+    LAYOUT_SLOTS = {
+        'pip': ['main', 'inset'],
+        'split_h': ['left', 'right'],
+        'split_v': ['top', 'bottom'],
+        'grid_2x2': ['slot1', 'slot2', 'slot3', 'slot4'],
+        'multi_pip_2': ['main', 'inset1', 'inset2'],
+        'multi_pip_3': ['main', 'inset1', 'inset2', 'inset3'],
+        'multi_pip_4': ['main', 'inset1', 'inset2', 'inset3', 'inset4'],
+    }
 
     # Validate layout type
-    if config.layout != 'pip':
-        raise HTTPException(status_code=400, detail=f"Layout '{config.layout}' not yet implemented. Only 'pip' is currently supported.")
+    if config.layout not in LAYOUT_SLOTS:
+        raise HTTPException(status_code=400, detail=f"Unknown layout type: {config.layout}")
 
-    # For PiP, we need 'main' and 'inset' slots
-    if 'main' not in config.streams or 'inset' not in config.streams:
-        raise HTTPException(status_code=400, detail="PiP layout requires 'main' and 'inset' slots to be assigned.")
+    expected_slots = LAYOUT_SLOTS[config.layout]
 
-    # Look up channel URLs
-    main_channel = get_channel_by_id(config.streams['main'])
-    inset_channel = get_channel_by_id(config.streams['inset'])
+    # Validate all required slots are assigned
+    for slot in expected_slots:
+        if slot not in config.streams:
+            raise HTTPException(status_code=400, detail=f"Layout '{config.layout}' requires slot '{slot}' to be assigned.")
 
-    if not main_channel:
-        raise HTTPException(status_code=404, detail=f"Channel not found: {config.streams['main']}")
-    if not inset_channel:
-        raise HTTPException(status_code=404, detail=f"Channel not found: {config.streams['inset']}")
+    # Validate audio_source is a valid slot
+    if config.audio_source not in expected_slots:
+        raise HTTPException(status_code=400, detail=f"Invalid audio_source: {config.audio_source}. Must be one of {expected_slots}.")
 
-    main_url = main_channel['url']
-    inset_url = inset_channel['url']
+    # Look up channel URLs in slot order
+    input_urls = []
+    channel_names = []
+    for slot in expected_slots:
+        channel_id = config.streams[slot]
+        channel = get_channel_by_id(channel_id)
+        if not channel:
+            raise HTTPException(status_code=404, detail=f"Channel not found: {channel_id}")
+        input_urls.append(channel['url'])
+        channel_names.append(channel['name'])
 
-    # Determine audio mode based on audio_source
-    audio_mode = 0  # default to main
-    if config.audio_source == 'inset':
-        audio_mode = 1
-    elif config.audio_source not in ['main', 'inset']:
-        raise HTTPException(status_code=400, detail=f"Invalid audio_source: {config.audio_source}. Must be 'main' or 'inset' for PiP layout.")
+    # Find audio index from audio_source slot
+    audio_index = expected_slots.index(config.audio_source)
 
     # Start the stream
     try:
-        # Use existing start_live function with main as IN1, inset as IN2
-        global PROC, LAST_HIT, MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE
         with LOCK:
             stop_ffmpeg()
             clean_outdir()
             PROC = subprocess.Popen(
-                build_live_cmd(main_url, inset_url, audio_mode),
+                build_layout_cmd(config.layout, input_urls, audio_index),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0
             )
             MODE = "live"
-            CUR_IN1, CUR_IN2 = main_url, inset_url
-            CUR_AUDIO_MODE = audio_mode
+            # Update new layout globals
+            CUR_LAYOUT = config.layout
+            CUR_INPUTS = input_urls
+            CUR_AUDIO_INDEX = audio_index
+            # Update legacy globals for backward compatibility
+            if len(input_urls) >= 2:
+                CUR_IN1, CUR_IN2 = input_urls[0], input_urls[1]
+                CUR_AUDIO_MODE = audio_index if audio_index in [0, 1] else 0
             LAST_HIT = time.time()
 
         # Store current layout config
@@ -617,10 +817,13 @@ async def set_layout(config: LayoutConfigModel):
 
         return {
             "status": "success",
-            "message": f"PiP layout started with {main_channel['name']} (main) and {inset_channel['name']} (inset)",
+            "message": f"Layout '{config.layout}' started with {len(input_urls)} streams",
             "audio_source": config.audio_source,
+            "streams": {slot: name for slot, name in zip(expected_slots, channel_names)},
         }
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to start layout: {str(e)}")
 
 @app.get("/api/layout/current")

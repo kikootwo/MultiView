@@ -14,24 +14,24 @@ export default function LayoutSelector({
 }: LayoutSelectorProps) {
   return (
     <div className="p-4">
-      <h2 className="text-lg font-semibold mb-4 text-gray-900">Select Layout</h2>
+      <h2 className="text-lg font-semibold mb-4 text-foreground">Select Layout</h2>
       <div className="grid grid-cols-2 gap-3">
         {LAYOUT_DEFINITIONS.map((layout) => (
           <button
             key={layout.type}
             onClick={() => onLayoutSelect(layout.type)}
-            className={`p-4 rounded-lg border-2 transition-all ${
+            className={`p-4 rounded-lg border-2 transition-all shadow-sm hover:shadow-md ${
               selectedLayout === layout.type
-                ? 'border-blue-500 bg-blue-50'
-                : 'border-gray-200 hover:border-gray-300'
+                ? 'border-primary bg-gradient-to-br from-primary/10 to-accent/10 shadow-md'
+                : 'border-card-border hover:border-primary'
             }`}
           >
             <div className="mb-2">
               {/* Layout visual preview */}
-              <LayoutPreview type={layout.type} />
+              <LayoutPreview type={layout.type} selected={selectedLayout === layout.type} />
             </div>
-            <div className="text-sm font-medium text-gray-900">{layout.name}</div>
-            <div className="text-xs text-gray-500 mt-1">{layout.description}</div>
+            <div className="text-sm font-medium text-foreground">{layout.name}</div>
+            <div className="text-xs text-muted mt-1">{layout.description}</div>
           </button>
         ))}
       </div>
@@ -42,21 +42,22 @@ export default function LayoutSelector({
 /**
  * Visual preview of layout types
  */
-function LayoutPreview({ type }: { type: LayoutType }) {
-  const previewClass = 'bg-gray-300 rounded';
+function LayoutPreview({ type, selected }: { type: LayoutType; selected: boolean }) {
+  const bgClass = selected ? 'bg-card-border' : 'bg-background';
+  const previewClass = selected ? 'bg-gradient-to-br from-primary to-accent rounded' : 'bg-muted rounded';
 
   switch (type) {
     case 'pip':
       return (
-        <div className="w-full h-16 bg-gray-200 rounded relative">
+        <div className={`w-full h-16 ${bgClass} rounded relative`}>
           <div className={`absolute inset-2 ${previewClass}`} />
-          <div className={`absolute bottom-3 right-3 w-6 h-6 ${previewClass} border-2 border-white`} />
+          <div className={`absolute bottom-3 right-3 w-6 h-6 ${previewClass} border-2 border-card`} />
         </div>
       );
 
     case 'split_h':
       return (
-        <div className="w-full h-16 flex gap-1">
+        <div className={`w-full h-16 ${bgClass} rounded p-1 flex gap-1`}>
           <div className={`flex-1 ${previewClass}`} />
           <div className={`flex-1 ${previewClass}`} />
         </div>
@@ -64,7 +65,7 @@ function LayoutPreview({ type }: { type: LayoutType }) {
 
     case 'split_v':
       return (
-        <div className="w-full h-16 flex flex-col gap-1">
+        <div className={`w-full h-16 ${bgClass} rounded p-1 flex flex-col gap-1`}>
           <div className={`flex-1 ${previewClass}`} />
           <div className={`flex-1 ${previewClass}`} />
         </div>
@@ -72,7 +73,7 @@ function LayoutPreview({ type }: { type: LayoutType }) {
 
     case 'grid_2x2':
       return (
-        <div className="w-full h-16 grid grid-cols-2 grid-rows-2 gap-1">
+        <div className={`w-full h-16 ${bgClass} rounded p-1 grid grid-cols-2 grid-rows-2 gap-1`}>
           <div className={previewClass} />
           <div className={previewClass} />
           <div className={previewClass} />
@@ -82,43 +83,31 @@ function LayoutPreview({ type }: { type: LayoutType }) {
 
     case 'multi_pip_2':
       return (
-        <div className="w-full h-16 bg-gray-200 rounded relative">
+        <div className={`w-full h-16 ${bgClass} rounded relative`}>
           <div className={`absolute inset-2 ${previewClass}`} />
-          <div className={`absolute bottom-3 right-3 w-5 h-5 ${previewClass} border border-white`} />
-          <div className={`absolute bottom-3 right-9 w-5 h-5 ${previewClass} border border-white`} />
+          <div className={`absolute bottom-3 right-3 w-5 h-5 ${previewClass} border border-card`} />
+          <div className={`absolute bottom-3 right-9 w-5 h-5 ${previewClass} border border-card`} />
         </div>
       );
 
     case 'multi_pip_3':
       return (
-        <div className="w-full h-16 bg-gray-200 rounded relative">
+        <div className={`w-full h-16 ${bgClass} rounded relative`}>
           <div className={`absolute inset-2 ${previewClass}`} />
-          <div className={`absolute bottom-3 right-3 w-4 h-4 ${previewClass} border border-white`} />
-          <div className={`absolute bottom-3 right-8 w-4 h-4 ${previewClass} border border-white`} />
-          <div className={`absolute bottom-3 right-13 w-4 h-4 ${previewClass} border border-white`} />
+          <div className={`absolute bottom-3 right-3 w-4 h-4 ${previewClass} border border-card`} />
+          <div className={`absolute bottom-3 right-8 w-4 h-4 ${previewClass} border border-card`} />
+          <div className={`absolute bottom-3 right-13 w-4 h-4 ${previewClass} border border-card`} />
         </div>
       );
 
     case 'multi_pip_4':
       return (
-        <div className="w-full h-16 bg-gray-200 rounded relative">
+        <div className={`w-full h-16 ${bgClass} rounded relative`}>
           <div className={`absolute inset-2 ${previewClass}`} />
-          <div className={`absolute top-3 right-3 w-4 h-4 ${previewClass} border border-white`} />
-          <div className={`absolute top-3 right-8 w-4 h-4 ${previewClass} border border-white`} />
-          <div className={`absolute bottom-3 right-3 w-4 h-4 ${previewClass} border border-white`} />
-          <div className={`absolute bottom-3 right-8 w-4 h-4 ${previewClass} border border-white`} />
-        </div>
-      );
-
-    case 'grid_3x3':
-      return (
-        <div className="w-full h-16 grid grid-cols-3 grid-rows-3 gap-0.5">
-          {[...Array(5)].map((_, i) => (
-            <div key={i} className={previewClass} />
-          ))}
-          {[...Array(4)].map((_, i) => (
-            <div key={`empty-${i}`} className="bg-gray-100 rounded" />
-          ))}
+          <div className={`absolute top-3 right-3 w-4 h-4 ${previewClass} border border-card`} />
+          <div className={`absolute top-3 right-8 w-4 h-4 ${previewClass} border border-card`} />
+          <div className={`absolute bottom-3 right-3 w-4 h-4 ${previewClass} border border-card`} />
+          <div className={`absolute bottom-3 right-8 w-4 h-4 ${previewClass} border border-card`} />
         </div>
       );
 
