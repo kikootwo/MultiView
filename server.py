@@ -44,7 +44,8 @@ MAX_STREAM_SIZE = int(os.getenv("MAX_STREAM_SIZE", str(500 * 1024 * 1024)))
 PROC = None
 LOCK = threading.Lock()
 LAST_HIT = 0.0
-MODE = "black"  # "black" or "live"
+LAST_CLIENT_DISCONNECT = 0.0  # Track when last client disconnected
+MODE = "idle"  # "idle", "black", or "live"
 CUR_IN1 = None
 CUR_IN2 = None
 CUR_AUDIO_MODE = 0  # Audio mode used for current stream (legacy)
@@ -422,7 +423,23 @@ def clean_outdir():
         try: p.unlink()
         except: pass
 
+def stop_to_idle():
+    """Stop FFmpeg completely and enter idle mode (zero GPU usage)."""
+    global PROC, MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, LAST_HIT
+    with LOCK:
+        stop_ffmpeg()
+        clean_outdir()
+        MODE = "idle"
+        # Keep layout config so we can restart on-demand
+        # CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX preserved
+        # Legacy vars cleared
+        CUR_IN1 = CUR_IN2 = None
+        CUR_AUDIO_MODE = 0
+        LAST_HIT = time.time()
+    print(f"Entered idle mode (no FFmpeg process)")
+
 def start_black():
+    """Legacy black screen mode - kept for compatibility."""
     global PROC, LAST_HIT, MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CURRENT_LAYOUT
     with LOCK:
         stop_ffmpeg()
@@ -462,8 +479,41 @@ def start_live(in1: str, in2: str):
         LAST_HIT = time.time()
 
 def ensure_running():
-    if not (PROC and PROC.poll() is None):
-        start_black()
+    """Legacy: ensure FFmpeg is running - now starts in idle mode instead."""
+    # No longer auto-starts black screen
+    # Streams start on-demand when /stream is accessed
+    pass
+
+def restart_last_layout():
+    """Restart FFmpeg with the last known layout configuration."""
+    global PROC, MODE, LAST_HIT, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE
+
+    if not CUR_LAYOUT or not CUR_INPUTS:
+        print("Cannot restart: no layout configured")
+        return False
+
+    try:
+        with LOCK:
+            stop_ffmpeg()
+            clean_outdir()
+            PROC = subprocess.Popen(
+                build_layout_cmd(CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0
+            )
+            MODE = "live"
+            # Update legacy vars for backward compatibility
+            if len(CUR_INPUTS) >= 2:
+                CUR_IN1, CUR_IN2 = CUR_INPUTS[0], CUR_INPUTS[1]
+                CUR_AUDIO_MODE = CUR_AUDIO_INDEX if CUR_AUDIO_INDEX in [0, 1] else 0
+            LAST_HIT = time.time()
+
+        print(f"Restarted layout '{CUR_LAYOUT}' with {len(CUR_INPUTS)} streams")
+        return True
+    except Exception as e:
+        print(f"Failed to restart layout: {e}")
+        return False
 
 def restart_current_stream():
     """Restart FFmpeg with the same settings to prevent file size growth."""
@@ -499,14 +549,24 @@ def restart_current_stream():
                 LAST_HIT = time.time()
 
 def idle_watchdog():
-    global MODE
+    global MODE, LAST_CLIENT_DISCONNECT
     while True:
         time.sleep(5)
-        ensure_running()
 
-        # Check idle timeout
-        if MODE == "live" and (time.time() - LAST_HIT > IDLE_TIMEOUT):
-            start_black()
+        # Get current client count
+        with BROADCAST_LOCK:
+            client_count = len(BROADCAST_CLIENTS)
+
+        # Track when last client disconnected
+        if client_count == 0 and MODE == "live":
+            if LAST_CLIENT_DISCONNECT == 0:
+                LAST_CLIENT_DISCONNECT = time.time()
+            elif time.time() - LAST_CLIENT_DISCONNECT > IDLE_TIMEOUT:
+                print(f"No clients for {IDLE_TIMEOUT}s, entering idle mode")
+                stop_to_idle()
+                LAST_CLIENT_DISCONNECT = 0
+        else:
+            LAST_CLIENT_DISCONNECT = 0  # Reset when clients are connected
 
         # Note: HLS segments auto-delete old content, no file size monitoring needed
 
@@ -561,7 +621,7 @@ threading.Thread(target=broadcast_reader, daemon=True).start()
 @app.on_event("startup")
 def boot():
     load_channels()  # Load channels on startup
-    start_black()
+    # Start in idle mode (no FFmpeg process until first client connects)
 
 @app.get("/")
 async def home(in1: str | None = None, in2: str | None = None):
@@ -589,8 +649,8 @@ async def control_start(in1: str, in2: str):
 
 @app.get("/control/stop")
 async def control_stop():
-    start_black()
-    return {"status":"standby"}
+    stop_to_idle()
+    return {"status":"idle"}
 
 @app.get("/control/swap")
 async def control_swap():
@@ -638,8 +698,15 @@ async def stream():
     Each client starts receiving from the current live point.
     Multiple clients can connect simultaneously.
     """
-    global LAST_HIT, BROADCAST_CLIENTS
+    global LAST_HIT, BROADCAST_CLIENTS, MODE
     LAST_HIT = time.time()
+
+    # Start FFmpeg on-demand if in idle mode
+    if MODE == "idle" and CUR_LAYOUT:
+        print("Client connected while idle, restarting last layout...")
+        if not restart_last_layout():
+            raise HTTPException(status_code=503, detail="Failed to start stream")
+        await asyncio.sleep(2)  # Give FFmpeg a moment to start
 
     # Create a queue for this client (threading.Queue, not asyncio)
     client_queue = queue.Queue(maxsize=100)
