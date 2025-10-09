@@ -334,17 +334,17 @@ def build_split_v_filter(inputs: list) -> str:
 def build_grid_2x2_filter(inputs: list) -> str:
     """2x2 Grid: 4 equal streams"""
     return (
-        "[0:v]fps=30,scale=960:-2:force_original_aspect_ratio=decrease,"
+        "[0:v]fps=30,scale=960:540:force_original_aspect_ratio=decrease,"
         "pad=960:540:(ow-iw)/2:(oh-ih)/2,setsar=1[s0];"
-        "[1:v]fps=30,scale=960:-2:force_original_aspect_ratio=decrease,"
+        "[1:v]fps=30,scale=960:540:force_original_aspect_ratio=decrease,"
         "pad=960:540:(ow-iw)/2:(oh-ih)/2,setsar=1[s1];"
-        "[2:v]fps=30,scale=960:-2:force_original_aspect_ratio=decrease,"
+        "[2:v]fps=30,scale=960:540:force_original_aspect_ratio=decrease,"
         "pad=960:540:(ow-iw)/2:(oh-ih)/2,setsar=1[s2];"
-        "[3:v]fps=30,scale=960:-2:force_original_aspect_ratio=decrease,"
+        "[3:v]fps=30,scale=960:540:force_original_aspect_ratio=decrease,"
         "pad=960:540:(ow-iw)/2:(oh-ih)/2,setsar=1[s3];"
-        "[s0][s1]hstack:shortest=0[top];"
-        "[s2][s3]hstack:shortest=0[bottom];"
-        "[top][bottom]vstack:shortest=0[v]"
+        "[s0][s1]hstack=inputs=2:shortest=0[top];"
+        "[s2][s3]hstack=inputs=2:shortest=0[bottom];"
+        "[top][bottom]vstack=inputs=2:shortest=0[v]"
     )
 
 def build_multi_pip_2_filter(inputs: list) -> str:
@@ -856,17 +856,27 @@ async def set_layout(config: LayoutConfigModel):
     # Find audio index from audio_source slot
     audio_index = expected_slots.index(config.audio_source)
 
-    # Start the stream
+    # Start the stream - optimistic restart for speed
     try:
         with LOCK:
-            stop_ffmpeg()
-            clean_outdir()
-            PROC = subprocess.Popen(
+            # Start new process first
+            new_proc = subprocess.Popen(
                 build_layout_cmd(config.layout, input_urls, audio_index),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0
             )
+
+            # Kill old process immediately (no graceful wait, no cleanup)
+            old_proc = PROC
+            if old_proc and old_proc.poll() is None:
+                try:
+                    old_proc.kill()
+                except:
+                    pass
+
+            # Swap to new process
+            PROC = new_proc
             MODE = "live"
             # Update new layout globals
             CUR_LAYOUT = config.layout

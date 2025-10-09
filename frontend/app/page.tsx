@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Channel, LayoutType } from '@/types';
 import { api } from '@/lib/api';
 import ChannelList from '@/components/ChannelList';
@@ -25,26 +25,25 @@ export default function Home() {
     loadCurrentLayout();
   }, []);
 
-  // Clear slot assignments when layout type changes
-  useEffect(() => {
-    setSlotAssignments({});
-    setAudioSource(null);
-    setActiveSlot(null);
-  }, [selectedLayout]);
-
   const loadCurrentLayout = async () => {
     try {
       const layout = await api.getCurrentLayout();
       if (layout && layout.layout) {
-        // Pre-populate form with current layout
         setSelectedLayout(layout.layout as LayoutType);
         setSlotAssignments(layout.streams || {});
         setAudioSource(layout.audio_source || null);
       }
     } catch (err) {
-      // No current layout or error - just use defaults
       console.log('No active layout or failed to load:', err);
     }
+  };
+
+  const handleLayoutSelect = (layout: LayoutType) => {
+    // User manually changed layout - clear assignments
+    setSelectedLayout(layout);
+    setSlotAssignments({});
+    setAudioSource(null);
+    setActiveSlot(null);
   };
 
   const loadChannels = async () => {
@@ -95,6 +94,14 @@ export default function Home() {
     }
   };
 
+  // Get list of channel IDs already assigned to OTHER slots (not the active one)
+  const getAssignedChannelIds = (): string[] => {
+    if (!activeSlot) return [];
+    return Object.entries(slotAssignments)
+      .filter(([slotId, _]) => slotId !== activeSlot)
+      .map(([_, channelId]) => channelId);
+  };
+
   const handleAudioSourceChange = (slotId: string) => {
     setAudioSource(slotId);
   };
@@ -103,7 +110,8 @@ export default function Home() {
     try {
       setIsLoading(true);
       setError(null);
-      setSuccess(null);
+      // Show immediate feedback
+      setSuccess('⏳ Swapping layouts... (takes ~15 seconds)');
 
       // Convert slot assignments to channel URLs
       const streams: Record<string, string> = {};
@@ -116,6 +124,7 @@ export default function Home() {
 
       if (!audioSource) {
         setError('Please select an audio source');
+        setSuccess(null);
         return;
       }
 
@@ -129,6 +138,7 @@ export default function Home() {
       setTimeout(() => setSuccess(null), 3000);
     } catch (err) {
       setError('Failed to apply layout. Backend API may not be ready yet.');
+      setSuccess(null);
       console.error(err);
     } finally {
       setIsLoading(false);
@@ -141,6 +151,10 @@ export default function Home() {
       setError(null);
       setSuccess(null);
       await api.stop();
+      // Clear the UI state
+      setSlotAssignments({});
+      setAudioSource(null);
+      setActiveSlot(null);
       setSuccess('Stream stopped (standby mode)');
       setTimeout(() => setSuccess(null), 3000);
     } catch (err) {
@@ -211,7 +225,7 @@ export default function Home() {
             <div className="flex-1 overflow-y-auto min-h-0">
               <LayoutSelector
                 selectedLayout={selectedLayout}
-                onLayoutSelect={setSelectedLayout}
+                onLayoutSelect={handleLayoutSelect}
               />
               <div className="border-t border-card-border">
                 <SlotAssignment
@@ -252,6 +266,7 @@ export default function Home() {
               channels={channels}
               onChannelSelect={handleChannelSelect}
               selectedChannelId={activeSlot ? slotAssignments[activeSlot] : null}
+              disabledChannelIds={getAssignedChannelIds()}
               onRefresh={handleRefreshChannels}
               isRefreshing={isLoading}
             />

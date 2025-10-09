@@ -7,6 +7,7 @@ interface ChannelListProps {
   channels: Channel[];
   onChannelSelect: (channel: Channel) => void;
   selectedChannelId?: string | null;
+  disabledChannelIds?: string[];
   onRefresh?: () => void;
   isRefreshing?: boolean;
 }
@@ -15,6 +16,7 @@ export default function ChannelList({
   channels,
   onChannelSelect,
   selectedChannelId,
+  disabledChannelIds = [],
   onRefresh,
   isRefreshing = false,
 }: ChannelListProps) {
@@ -73,39 +75,52 @@ export default function ChannelList({
           </div>
         ) : (
           <div className="divide-y divide-card-border">
-            {filteredChannels.map((channel) => (
-              <button
-                key={channel.id}
-                onClick={() => onChannelSelect(channel)}
-                className={`w-full flex items-center gap-3 p-3 transition-all hover:bg-primary hover:bg-opacity-5 hover:shadow-sm ${
-                  selectedChannelId === channel.id
-                    ? 'bg-primary bg-opacity-10 shadow-sm'
-                    : ''
-                }`}
-              >
-                {/* Channel icon */}
-                <div className="w-10 h-10 flex-shrink-0 bg-background rounded overflow-hidden flex items-center justify-center border border-card-border">
-                  {getImageUrl(channel.icon) ? (
-                    <img
-                      src={getImageUrl(channel.icon)!}
-                      alt={channel.name}
-                      className="w-full h-full object-cover"
-                      onError={(e) => {
-                        // Hide broken images
-                        e.currentTarget.style.display = 'none';
-                      }}
-                    />
-                  ) : (
-                    <div className="text-muted text-xs">📺</div>
-                  )}
-                </div>
+            {filteredChannels.map((channel) => {
+              const isDisabled = disabledChannelIds.includes(channel.id);
+              const isSelected = selectedChannelId === channel.id;
 
-                {/* Channel name */}
-                <div className="flex-1 text-left">
-                  <div className="font-medium text-foreground">{channel.name}</div>
-                </div>
-              </button>
-            ))}
+              return (
+                <button
+                  key={channel.id}
+                  onClick={() => !isDisabled && onChannelSelect(channel)}
+                  disabled={isDisabled}
+                  className={`w-full flex items-center gap-3 p-3 transition-all ${
+                    isDisabled
+                      ? 'opacity-40 cursor-not-allowed'
+                      : 'hover:bg-primary hover:bg-opacity-5 hover:shadow-sm'
+                  } ${
+                    isSelected
+                      ? 'bg-primary bg-opacity-10 shadow-sm'
+                      : ''
+                  }`}
+                >
+                  {/* Channel icon */}
+                  <div className="w-10 h-10 flex-shrink-0 bg-background rounded overflow-hidden flex items-center justify-center border border-card-border">
+                    {getImageUrl(channel.icon) ? (
+                      <img
+                        src={getImageUrl(channel.icon)!}
+                        alt={channel.name}
+                        className="w-full h-full object-cover"
+                        onError={(e) => {
+                          // Hide broken images
+                          e.currentTarget.style.display = 'none';
+                        }}
+                      />
+                    ) : (
+                      <div className="text-muted text-xs">📺</div>
+                    )}
+                  </div>
+
+                  {/* Channel name */}
+                  <div className="flex-1 text-left">
+                    <div className="font-medium text-foreground">
+                      {channel.name}
+                      {isDisabled && <span className="ml-2 text-xs text-muted">(assigned)</span>}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
