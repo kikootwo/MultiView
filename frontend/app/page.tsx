@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { Channel, LayoutType } from '@/types';
 import { api } from '@/lib/api';
 import ChannelList from '@/components/ChannelList';
@@ -98,8 +98,8 @@ export default function Home() {
   const getAssignedChannelIds = (): string[] => {
     if (!activeSlot) return [];
     return Object.entries(slotAssignments)
-      .filter(([slotId, _]) => slotId !== activeSlot)
-      .map(([_, channelId]) => channelId);
+      .filter(([slotId]) => slotId !== activeSlot)
+      .map(([, channelId]) => channelId);
   };
 
   const handleAudioSourceChange = (slotId: string) => {
@@ -110,8 +110,7 @@ export default function Home() {
     try {
       setIsLoading(true);
       setError(null);
-      // Show immediate feedback
-      setSuccess('⏳ Swapping layouts... (takes ~15 seconds)');
+      setSuccess('🔄 Starting stream...');
 
       // Convert slot assignments to channel URLs
       const streams: Record<string, string> = {};
@@ -125,19 +124,55 @@ export default function Home() {
       if (!audioSource) {
         setError('Please select an audio source');
         setSuccess(null);
+        setIsLoading(false);
         return;
       }
 
+      // Send layout request
       await api.setLayout({
         layout: selectedLayout,
         streams,
         audio_source: audioSource,
       });
 
-      setSuccess('Layout applied successfully! 🎉');
+      // Poll status until stream is confirmed running
+      setSuccess('⏳ Connecting to streams...');
+
+      let attempts = 0;
+      const maxAttempts = 30; // 30 seconds max
+
+      const pollStatus = async (): Promise<boolean> => {
+        try {
+          const status = await api.getStatus();
+
+          if (status.mode === 'live' && status.proc_running) {
+            return true; // Stream is live!
+          }
+
+          attempts++;
+          if (attempts >= maxAttempts) {
+            throw new Error('Stream startup timeout');
+          }
+
+          // Update progress message
+          const elapsed = attempts;
+          setSuccess(`⏳ Connecting to streams... (${elapsed}s)`);
+
+          // Wait 1 second and try again
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          return pollStatus();
+        } catch {
+          throw new Error('Failed to verify stream status');
+        }
+      };
+
+      await pollStatus();
+
+      setSuccess('⭐ Layout applied successfully!');
       setTimeout(() => setSuccess(null), 3000);
     } catch (err) {
-      setError('Failed to apply layout. Backend API may not be ready yet.');
+      const errorMessage = err instanceof Error ? err.message : 'Failed to apply layout';
+      setError(errorMessage);
       setSuccess(null);
       console.error(err);
     } finally {
@@ -185,7 +220,7 @@ export default function Home() {
         {/* Success banner */}
         {success && (
           <div className="bg-success bg-opacity-10 border-l-4 border-success p-3 animate-in slide-in-from-top">
-            <p className="text-sm font-medium text-green-700 dark:text-green-300">{success}</p>
+            <p className="text-sm font-medium text-white">{success}</p>
           </div>
         )}
       </header>

@@ -30,7 +30,7 @@ export interface LayoutConfig {
 // API Response types
 export interface StatusResponse {
   proc_running: boolean;
-  mode: 'black' | 'live';
+  mode: 'idle' | 'black' | 'live';
   in1: string | null;
   in2: string | null;
   idle_timeout_sec: number;
