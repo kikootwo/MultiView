@@ -55,6 +55,15 @@ function LayoutPreview({ type, selected }: { type: LayoutType; selected: boolean
         </div>
       );
 
+    case 'dvd_pip':
+      return (
+        <div className={`w-full h-16 ${bgClass} rounded relative`}>
+          <div className={`absolute inset-2 ${previewClass}`} />
+          {/* Show inset in center-ish position to suggest movement */}
+          <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-6 h-6 ${previewClass} border-2 border-card`} />
+        </div>
+      );
+
     case 'split_h':
       return (
         <div className={`w-full h-16 ${bgClass} rounded p-1 flex gap-1`}>

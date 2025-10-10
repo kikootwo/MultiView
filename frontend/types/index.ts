@@ -9,6 +9,7 @@ export interface Channel {
 // Layout types
 export type LayoutType =
   | 'pip'           // Picture-in-Picture: 1 main + 1 inset
+  | 'dvd_pip'       // DVD Screensaver PiP: 1 main + 1 bouncing inset
   | 'multi_pip_2'   // 1 main + 2 small insets
   | 'multi_pip_3'   // 1 main + 3 small insets
   | 'multi_pip_4'   // 1 main + 4 small insets

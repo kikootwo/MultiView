@@ -261,6 +261,8 @@ def build_layout_cmd(layout: str, input_urls: list, audio_index: int):
     # Build filter_complex based on layout
     if layout == 'pip':
         fc = build_pip_filter(input_urls)
+    elif layout == 'dvd_pip':
+        fc = build_dvd_pip_filter(input_urls)
     elif layout == 'split_h':
         fc = build_split_h_filter(input_urls)
     elif layout == 'split_v':
@@ -309,6 +311,23 @@ def build_pip_filter(inputs: list) -> str:
         f"[1:v]scale={INSET_SCALE}:-2:force_original_aspect_ratio=decrease,setsar=1,"
         f"pad={INSET_SCALE+16}:376:8:8:color=white[pip];"
         f"[base][pip]overlay=W-w-{INSET_MARGIN}:H-h-{INSET_MARGIN}:shortest=1[v]"
+    )
+
+def build_dvd_pip_filter(inputs: list) -> str:
+    """DVD Screensaver PiP: 1 main + 1 bouncing inset (just like the DVD logo!)"""
+    margin = 10
+    # Triangle wave expressions for smooth bouncing
+    # x bounces horizontally at 100 pixels/second
+    # y bounces vertically at 75 pixels/second (different speed for diagonal effect)
+    x_expr = f"abs(mod(t*100, 2*(W-w-{margin})) - (W-w-{margin}))"
+    y_expr = f"abs(mod(t*75, 2*(H-h-{margin})) - (H-h-{margin}))"
+
+    return (
+        "[0:v]fps=30,scale=1920:-2:force_original_aspect_ratio=decrease,"
+        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[base];"
+        f"[1:v]scale={INSET_SCALE}:-2:force_original_aspect_ratio=decrease,setsar=1,"
+        f"pad={INSET_SCALE+16}:376:8:8:color=white[pip];"
+        f"[base][pip]overlay=x='{x_expr}':y='{y_expr}':shortest=1[v]"
     )
 
 def build_split_h_filter(inputs: list) -> str:
@@ -819,6 +838,7 @@ async def set_layout(config: LayoutConfigModel):
     # Define slot order for each layout type (must match filter builders)
     LAYOUT_SLOTS = {
         'pip': ['main', 'inset'],
+        'dvd_pip': ['main', 'inset'],
         'split_h': ['left', 'right'],
         'split_v': ['top', 'bottom'],
         'grid_2x2': ['slot1', 'slot2', 'slot3', 'slot4'],
