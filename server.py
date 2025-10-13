@@ -53,6 +53,7 @@ CUR_AUDIO_MODE = 0  # Audio mode used for current stream (legacy)
 CUR_LAYOUT = None  # Current layout type
 CUR_INPUTS = []  # List of input URLs in slot order
 CUR_AUDIO_INDEX = 0  # Index of input providing audio
+CUR_CUSTOM_SLOTS = None  # For custom layouts, list of slot definitions
 
 # Channel storage (in-memory)
 CHANNELS = []
@@ -68,9 +69,10 @@ BROADCAST_LOCK = threading.Lock()
 
 # Pydantic models for API
 class LayoutConfigModel(BaseModel):
-    layout: str  # 'pip', 'split_h', 'grid_2x2', etc.
+    layout: str  # 'pip', 'split_h', 'grid_2x2', 'custom', etc.
     streams: Dict[str, str]  # slotId -> channelId
     audio_source: str  # slotId providing audio
+    custom_slots: list = None  # For custom layouts: [{ id, name, x, y, width, height }]
 
 app.mount("/hls", StaticFiles(directory=OUTDIR), name="hls")
 
@@ -249,14 +251,15 @@ def build_live_cmd(in1: str, in2: str, audio_mode: int):
     # Legacy function for backward compatibility - delegates to build_layout_cmd
     return build_layout_cmd('pip', [in1, in2], audio_mode)
 
-def build_layout_cmd(layout: str, input_urls: list, audio_index: int):
+def build_layout_cmd(layout: str, input_urls: list, audio_index: int, custom_slots: list = None):
     """
     Build FFmpeg command for any layout type.
 
     Args:
-        layout: Layout type ('pip', 'split_h', 'split_v', 'grid_2x2', 'multi_pip_2', 'multi_pip_3', 'multi_pip_4')
+        layout: Layout type ('pip', 'split_h', 'split_v', 'grid_2x2', 'multi_pip_2', 'multi_pip_3', 'multi_pip_4', 'custom')
         input_urls: List of input stream URLs (in slot order)
         audio_index: Index of input to use for audio (0-based)
+        custom_slots: For custom layouts, list of slot definitions with x, y, width, height
     """
     # Build filter_complex based on layout
     if layout == 'pip':
@@ -275,6 +278,10 @@ def build_layout_cmd(layout: str, input_urls: list, audio_index: int):
         fc = build_multi_pip_3_filter(input_urls)
     elif layout == 'multi_pip_4':
         fc = build_multi_pip_4_filter(input_urls)
+    elif layout == 'custom':
+        if not custom_slots:
+            raise ValueError("Custom layout requires slot definitions")
+        fc = build_custom_layout_filter(custom_slots)
     else:
         raise ValueError(f"Unknown layout type: {layout}")
 
@@ -425,6 +432,69 @@ def build_multi_pip_4_filter(inputs: list) -> str:
         f"[tmp3][pip4]overlay=W-w-{margin}:{margin}+{inset_h+8+gap}:shortest=0[v]"
     )
 
+def build_custom_layout_filter(slots: list) -> str:
+    """
+    Custom Layout: User-defined slot positions and sizes.
+
+    Args:
+        slots: List of dicts with keys: x, y, width, height, border (all in pixels, border is boolean)
+
+    Returns:
+        FFmpeg filter_complex string
+    """
+    if not slots or len(slots) > 5:
+        raise ValueError("Custom layout must have 1-5 slots")
+
+    # Sort slots by size (largest first) for z-ordering
+    sorted_slots = sorted(slots, key=lambda s: s['width'] * s['height'], reverse=True)
+
+    # Build filter string
+    parts = []
+
+    # Scale each input to its slot dimensions
+    for i, slot in enumerate(sorted_slots):
+        w = slot['width']
+        h = slot['height']
+        has_border = slot.get('border', False)
+
+        # Base scale and pad to ensure content fits
+        filter_chain = f"[{i}:v]fps=30,scale={w}:{h}:force_original_aspect_ratio=decrease," \
+                      f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+
+        # Add white border if enabled (8px on all sides)
+        if has_border:
+            border_width = w + 16  # 8px on each side
+            border_height = h + 16
+            filter_chain += f",pad={border_width}:{border_height}:8:8:color=white"
+
+        filter_chain += f"[s{i}]"
+        parts.append(filter_chain)
+
+    # Create black 1920x1080 base
+    parts.append("color=c=black:s=1920x1080:r=30[base]")
+
+    # Chain overlays
+    prev_label = "base"
+    for i, slot in enumerate(sorted_slots):
+        x = slot['x']
+        y = slot['y']
+        has_border = slot.get('border', False)
+
+        # Adjust position if border is enabled (offset by -8px to account for border)
+        if has_border:
+            x = max(0, x - 8)
+            y = max(0, y - 8)
+
+        if i == len(sorted_slots) - 1:
+            # Last overlay outputs to [v]
+            parts.append(f"[{prev_label}][s{i}]overlay={x}:{y}:shortest=0[v]")
+        else:
+            # Intermediate overlays
+            parts.append(f"[{prev_label}][s{i}]overlay={x}:{y}:shortest=0[tmp{i}]")
+            prev_label = f"tmp{i}"
+
+    return ";".join(parts)
+
 def stop_ffmpeg():
     global PROC
     if PROC and PROC.poll() is None:
@@ -459,7 +529,7 @@ def stop_to_idle():
 
 def start_black():
     """Legacy black screen mode - kept for compatibility."""
-    global PROC, LAST_HIT, MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CURRENT_LAYOUT
+    global PROC, LAST_HIT, MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_CUSTOM_SLOTS, CURRENT_LAYOUT
     with LOCK:
         stop_ffmpeg()
         clean_outdir()
@@ -476,6 +546,7 @@ def start_black():
         CUR_LAYOUT = None
         CUR_INPUTS = []
         CUR_AUDIO_INDEX = 0
+        CUR_CUSTOM_SLOTS = None
         LAST_HIT = time.time()
     # Clear current layout when stopping
     with CURRENT_LAYOUT_LOCK:
@@ -505,7 +576,7 @@ def ensure_running():
 
 def restart_last_layout():
     """Restart FFmpeg with the last known layout configuration."""
-    global PROC, MODE, LAST_HIT, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE
+    global PROC, MODE, LAST_HIT, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, CUR_CUSTOM_SLOTS
 
     if not CUR_LAYOUT or not CUR_INPUTS:
         print("Cannot restart: no layout configured")
@@ -516,7 +587,7 @@ def restart_last_layout():
             stop_ffmpeg()
             clean_outdir()
             PROC = subprocess.Popen(
-                build_layout_cmd(CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX),
+                build_layout_cmd(CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_CUSTOM_SLOTS),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0
@@ -536,7 +607,7 @@ def restart_last_layout():
 
 def restart_current_stream():
     """Restart FFmpeg with the same settings to prevent file size growth."""
-    global MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, PROC, LAST_HIT
+    global MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_CUSTOM_SLOTS, PROC, LAST_HIT
     if MODE == "black":
         start_black()
     elif MODE == "live":
@@ -546,7 +617,7 @@ def restart_current_stream():
                 stop_ffmpeg()
                 clean_outdir()
                 PROC = subprocess.Popen(
-                    build_layout_cmd(CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX),
+                    build_layout_cmd(CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_CUSTOM_SLOTS),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     bufsize=0
@@ -826,14 +897,15 @@ async def set_layout(config: LayoutConfigModel):
     """
     Set layout configuration and start streaming.
 
-    Supports all layout types: pip, split_h, split_v, grid_2x2, multi_pip_2, multi_pip_3, multi_pip_4
+    Supports all layout types: pip, split_h, split_v, grid_2x2, multi_pip_2, multi_pip_3, multi_pip_4, custom
 
     Expects:
     - layout: Layout type string
     - streams: { slotId: channelId } mapping
     - audio_source: slotId providing audio
+    - custom_slots: (for custom layouts) list of slot definitions
     """
-    global CURRENT_LAYOUT, PROC, LAST_HIT, MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX
+    global CURRENT_LAYOUT, PROC, LAST_HIT, MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_CUSTOM_SLOTS
 
     # Define slot order for each layout type (must match filter builders)
     LAYOUT_SLOTS = {
@@ -847,41 +919,85 @@ async def set_layout(config: LayoutConfigModel):
         'multi_pip_4': ['main', 'inset1', 'inset2', 'inset3', 'inset4'],
     }
 
-    # Validate layout type
-    if config.layout not in LAYOUT_SLOTS:
-        raise HTTPException(status_code=400, detail=f"Unknown layout type: {config.layout}")
+    # Handle custom layouts
+    if config.layout == 'custom':
+        if not config.custom_slots:
+            raise HTTPException(status_code=400, detail="Custom layout requires custom_slots")
 
-    expected_slots = LAYOUT_SLOTS[config.layout]
+        # Validate custom slots
+        if len(config.custom_slots) < 1 or len(config.custom_slots) > 5:
+            raise HTTPException(status_code=400, detail="Custom layout must have 1-5 slots")
 
-    # Validate all required slots are assigned
-    for slot in expected_slots:
-        if slot not in config.streams:
-            raise HTTPException(status_code=400, detail=f"Layout '{config.layout}' requires slot '{slot}' to be assigned.")
+        # Extract slot IDs from custom_slots
+        expected_slots = [slot['id'] for slot in config.custom_slots]
 
-    # Validate audio_source is a valid slot
-    if config.audio_source not in expected_slots:
-        raise HTTPException(status_code=400, detail=f"Invalid audio_source: {config.audio_source}. Must be one of {expected_slots}.")
+        # Validate all required slots are assigned
+        for slot_id in expected_slots:
+            if slot_id not in config.streams:
+                raise HTTPException(status_code=400, detail=f"Custom layout requires slot '{slot_id}' to be assigned.")
 
-    # Look up channel URLs in slot order
-    input_urls = []
-    channel_names = []
-    for slot in expected_slots:
-        channel_id = config.streams[slot]
-        channel = get_channel_by_id(channel_id)
-        if not channel:
-            raise HTTPException(status_code=404, detail=f"Channel not found: {channel_id}")
-        input_urls.append(channel['url'])
-        channel_names.append(channel['name'])
+        # Validate audio_source is a valid slot
+        if config.audio_source not in expected_slots:
+            raise HTTPException(status_code=400, detail=f"Invalid audio_source: {config.audio_source}. Must be one of {expected_slots}.")
 
-    # Find audio index from audio_source slot
-    audio_index = expected_slots.index(config.audio_source)
+        # Look up channel URLs in slot order (sorted by size for z-ordering)
+        sorted_slots = sorted(config.custom_slots, key=lambda s: s['width'] * s['height'], reverse=True)
+        sorted_slot_ids = [slot['id'] for slot in sorted_slots]
+
+        input_urls = []
+        channel_names = []
+        for slot_id in sorted_slot_ids:
+            channel_id = config.streams[slot_id]
+            channel = get_channel_by_id(channel_id)
+            if not channel:
+                raise HTTPException(status_code=404, detail=f"Channel not found: {channel_id}")
+            input_urls.append(channel['url'])
+            channel_names.append(channel['name'])
+
+        # Find audio index from audio_source slot (in sorted order)
+        audio_index = sorted_slot_ids.index(config.audio_source)
+
+        # Prepare custom slots for FFmpeg (sorted by size)
+        custom_slots_for_ffmpeg = sorted_slots
+
+    else:
+        # Validate layout type
+        if config.layout not in LAYOUT_SLOTS:
+            raise HTTPException(status_code=400, detail=f"Unknown layout type: {config.layout}")
+
+        expected_slots = LAYOUT_SLOTS[config.layout]
+
+        # Validate all required slots are assigned
+        for slot in expected_slots:
+            if slot not in config.streams:
+                raise HTTPException(status_code=400, detail=f"Layout '{config.layout}' requires slot '{slot}' to be assigned.")
+
+        # Validate audio_source is a valid slot
+        if config.audio_source not in expected_slots:
+            raise HTTPException(status_code=400, detail=f"Invalid audio_source: {config.audio_source}. Must be one of {expected_slots}.")
+
+        # Look up channel URLs in slot order
+        input_urls = []
+        channel_names = []
+        for slot in expected_slots:
+            channel_id = config.streams[slot]
+            channel = get_channel_by_id(channel_id)
+            if not channel:
+                raise HTTPException(status_code=404, detail=f"Channel not found: {channel_id}")
+            input_urls.append(channel['url'])
+            channel_names.append(channel['name'])
+
+        # Find audio index from audio_source slot
+        audio_index = expected_slots.index(config.audio_source)
+
+        custom_slots_for_ffmpeg = None
 
     # Start the stream - optimistic restart for speed
     try:
         with LOCK:
             # Start new process first
             new_proc = subprocess.Popen(
-                build_layout_cmd(config.layout, input_urls, audio_index),
+                build_layout_cmd(config.layout, input_urls, audio_index, custom_slots_for_ffmpeg),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0
@@ -902,6 +1018,7 @@ async def set_layout(config: LayoutConfigModel):
             CUR_LAYOUT = config.layout
             CUR_INPUTS = input_urls
             CUR_AUDIO_INDEX = audio_index
+            CUR_CUSTOM_SLOTS = custom_slots_for_ffmpeg
             # Update legacy globals for backward compatibility
             if len(input_urls) >= 2:
                 CUR_IN1, CUR_IN2 = input_urls[0], input_urls[1]

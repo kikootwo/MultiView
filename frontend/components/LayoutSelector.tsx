@@ -1,41 +1,168 @@
 'use client';
 
-import { LayoutType } from '@/types';
+import { useState, useEffect } from 'react';
+import { LayoutType, CustomLayout } from '@/types';
 import { LAYOUT_DEFINITIONS } from '@/lib/layouts';
+import { loadCustomLayouts, deleteCustomLayout } from '@/lib/customLayouts';
+import { Plus, Edit, Trash2 } from 'lucide-react';
+import LayoutEditor from './LayoutEditor';
 
 interface LayoutSelectorProps {
   selectedLayout: LayoutType;
-  onLayoutSelect: (layout: LayoutType) => void;
+  selectedCustomLayoutId?: string | null;
+  onLayoutSelect: (layout: LayoutType, customLayoutId?: string) => void;
 }
 
 export default function LayoutSelector({
   selectedLayout,
+  selectedCustomLayoutId,
   onLayoutSelect,
 }: LayoutSelectorProps) {
+  const [customLayouts, setCustomLayouts] = useState<CustomLayout[]>([]);
+  const [showEditor, setShowEditor] = useState(false);
+  const [editingLayoutId, setEditingLayoutId] = useState<string | undefined>(undefined);
+
+  // Load custom layouts on mount and when editor closes
+  useEffect(() => {
+    refreshCustomLayouts();
+  }, []);
+
+  const refreshCustomLayouts = () => {
+    setCustomLayouts(loadCustomLayouts());
+  };
+
+  const handleCreateNew = () => {
+    setEditingLayoutId(undefined);
+    setShowEditor(true);
+  };
+
+  const handleEdit = (layoutId: string) => {
+    setEditingLayoutId(layoutId);
+    setShowEditor(true);
+  };
+
+  const handleDelete = (layoutId: string) => {
+    if (confirm('Are you sure you want to delete this custom layout?')) {
+      deleteCustomLayout(layoutId);
+      refreshCustomLayouts();
+
+      // Deselect if deleted layout was selected
+      if (selectedCustomLayoutId === layoutId) {
+        onLayoutSelect('pip');
+      }
+    }
+  };
+
+  const handleEditorClose = () => {
+    setShowEditor(false);
+    setEditingLayoutId(undefined);
+    refreshCustomLayouts();
+  };
+
   return (
-    <div className="p-4">
-      <h2 className="text-lg font-semibold mb-4 text-foreground">Select Layout</h2>
-      <div className="grid grid-cols-2 gap-3">
-        {LAYOUT_DEFINITIONS.map((layout) => (
-          <button
-            key={layout.type}
-            onClick={() => onLayoutSelect(layout.type)}
-            className={`p-4 rounded-lg border-2 transition-all shadow-sm hover:shadow-md ${
-              selectedLayout === layout.type
-                ? 'border-primary bg-gradient-to-br from-primary/10 to-accent/10 shadow-md'
-                : 'border-card-border hover:border-primary'
-            }`}
-          >
-            <div className="mb-2">
-              {/* Layout visual preview */}
-              <LayoutPreview type={layout.type} selected={selectedLayout === layout.type} />
+    <>
+      <div className="p-4">
+        {/* Base Layouts */}
+        <h2 className="text-lg font-semibold mb-4 text-foreground">Base Layouts</h2>
+        <div className="grid grid-cols-2 gap-3 mb-6">
+          {LAYOUT_DEFINITIONS.map((layout) => (
+            <button
+              key={layout.type}
+              onClick={() => onLayoutSelect(layout.type)}
+              className={`p-4 rounded-lg border-2 transition-all shadow-sm hover:shadow-md ${
+                selectedLayout === layout.type && !selectedCustomLayoutId
+                  ? 'border-primary bg-gradient-to-br from-primary/10 to-accent/10 shadow-md'
+                  : 'border-card-border hover:border-primary'
+              }`}
+            >
+              <div className="mb-2">
+                <LayoutPreview
+                  type={layout.type}
+                  selected={selectedLayout === layout.type && !selectedCustomLayoutId}
+                />
+              </div>
+              <div className="text-sm font-medium text-foreground">{layout.name}</div>
+              <div className="text-xs text-muted mt-1">{layout.description}</div>
+            </button>
+          ))}
+        </div>
+
+        {/* Custom Layouts */}
+        <div className="border-t border-card-border pt-4">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-foreground">Custom Layouts</h2>
+            <button
+              onClick={handleCreateNew}
+              className="flex items-center gap-2 bg-primary hover:bg-primary-hover text-white px-3 py-2 rounded-lg transition-colors text-sm font-medium touch-manipulation"
+              style={{ minHeight: '44px' }}
+            >
+              <Plus size={16} />
+              Create New
+            </button>
+          </div>
+
+          {customLayouts.length === 0 ? (
+            <div className="text-center py-8 text-muted">
+              <p className="text-sm">No custom layouts yet</p>
+              <p className="text-xs mt-1">Create your first custom layout!</p>
             </div>
-            <div className="text-sm font-medium text-foreground">{layout.name}</div>
-            <div className="text-xs text-muted mt-1">{layout.description}</div>
-          </button>
-        ))}
+          ) : (
+            <div className="grid grid-cols-1 gap-3">
+              {customLayouts.map((layout) => (
+                <div
+                  key={layout.id}
+                  className={`p-4 rounded-lg border-2 transition-all ${
+                    selectedCustomLayoutId === layout.id
+                      ? 'border-primary bg-gradient-to-br from-primary/10 to-accent/10'
+                      : 'border-card-border'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <button
+                      onClick={() => onLayoutSelect('custom', layout.id)}
+                      className="flex-1 text-left"
+                    >
+                      <div className="text-sm font-medium text-foreground">{layout.name}</div>
+                      <div className="text-xs text-muted mt-1">
+                        {layout.slots.length} slot{layout.slots.length !== 1 ? 's' : ''}
+                      </div>
+                    </button>
+
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => handleEdit(layout.id)}
+                        className="p-2 hover:bg-primary/10 rounded-lg transition-colors touch-manipulation"
+                        style={{ minWidth: '44px', minHeight: '44px' }}
+                        title="Edit"
+                      >
+                        <Edit size={16} className="text-primary" />
+                      </button>
+                      <button
+                        onClick={() => handleDelete(layout.id)}
+                        className="p-2 hover:bg-red-500/10 rounded-lg transition-colors touch-manipulation"
+                        style={{ minWidth: '44px', minHeight: '44px' }}
+                        title="Delete"
+                      >
+                        <Trash2 size={16} className="text-red-500" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
-    </div>
+
+      {/* Layout Editor Modal */}
+      {showEditor && (
+        <LayoutEditor
+          layoutId={editingLayoutId}
+          onClose={handleEditorClose}
+          onSave={handleEditorClose}
+        />
+      )}
+    </>
   );
 }
 

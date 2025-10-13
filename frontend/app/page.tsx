@@ -1,8 +1,9 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Channel, LayoutType } from '@/types';
+import { Channel, LayoutType, CustomLayout } from '@/types';
 import { api } from '@/lib/api';
+import { getCustomLayoutById, loadCustomLayouts } from '@/lib/customLayouts';
 import ChannelList from '@/components/ChannelList';
 import LayoutSelector from '@/components/LayoutSelector';
 import SlotAssignment from '@/components/SlotAssignment';
@@ -11,6 +12,8 @@ import StatusDisplay from '@/components/StatusDisplay';
 export default function Home() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [selectedLayout, setSelectedLayout] = useState<LayoutType>('pip');
+  const [selectedCustomLayoutId, setSelectedCustomLayoutId] = useState<string | null>(null);
+  const [selectedCustomLayout, setSelectedCustomLayout] = useState<CustomLayout | null>(null);
   const [slotAssignments, setSlotAssignments] = useState<Record<string, string>>({});
   const [audioSource, setAudioSource] = useState<string | null>(null);
   const [activeSlot, setActiveSlot] = useState<string | null>(null);
@@ -32,18 +35,56 @@ export default function Home() {
         setSelectedLayout(layout.layout as LayoutType);
         setSlotAssignments(layout.streams || {});
         setAudioSource(layout.audio_source || null);
+
+        // Handle custom layout restoration
+        if (layout.layout === 'custom' && layout.custom_slots) {
+          // Try to find matching custom layout in localStorage
+          const customLayouts = loadCustomLayouts();
+
+          // Match by comparing slot configurations
+          const matchingLayout = customLayouts.find(cl => {
+            if (!layout.custom_slots || cl.slots.length !== layout.custom_slots.length) return false;
+
+            // Check if all slots match (by comparing id, x, y, width, height)
+            return layout.custom_slots.every((apiSlot) => {
+              const matchingSlot = cl.slots.find(s =>
+                s.id === apiSlot.id &&
+                s.x === apiSlot.x &&
+                s.y === apiSlot.y &&
+                s.width === apiSlot.width &&
+                s.height === apiSlot.height
+              );
+              return !!matchingSlot;
+            });
+          });
+
+          if (matchingLayout) {
+            setSelectedCustomLayoutId(matchingLayout.id);
+            setSelectedCustomLayout(matchingLayout);
+          }
+        }
       }
     } catch (err) {
       console.log('No active layout or failed to load:', err);
     }
   };
 
-  const handleLayoutSelect = (layout: LayoutType) => {
+  const handleLayoutSelect = (layout: LayoutType, customLayoutId?: string) => {
     // User manually changed layout - clear assignments
     setSelectedLayout(layout);
     setSlotAssignments({});
     setAudioSource(null);
     setActiveSlot(null);
+
+    // Handle custom layout selection
+    if (layout === 'custom' && customLayoutId) {
+      setSelectedCustomLayoutId(customLayoutId);
+      const customLayout = getCustomLayoutById(customLayoutId);
+      setSelectedCustomLayout(customLayout);
+    } else {
+      setSelectedCustomLayoutId(null);
+      setSelectedCustomLayout(null);
+    }
   };
 
   const loadChannels = async () => {
@@ -128,12 +169,27 @@ export default function Home() {
         return;
       }
 
-      // Send layout request
-      await api.setLayout({
+      // Prepare layout request
+      interface LayoutRequest {
+        layout: LayoutType;
+        streams: Record<string, string>;
+        audio_source: string;
+        custom_slots?: Array<{id: string; name: string; x: number; y: number; width: number; height: number}>;
+      }
+
+      const layoutRequest: LayoutRequest = {
         layout: selectedLayout,
         streams,
         audio_source: audioSource,
-      });
+      };
+
+      // Include custom slots if it's a custom layout
+      if (selectedLayout === 'custom' && selectedCustomLayout) {
+        layoutRequest.custom_slots = selectedCustomLayout.slots;
+      }
+
+      // Send layout request
+      await api.setLayout(layoutRequest);
 
       // Poll status until stream is confirmed running
       setSuccess('⏳ Connecting to streams...');
@@ -260,11 +316,13 @@ export default function Home() {
             <div className="flex-1 overflow-y-auto min-h-0">
               <LayoutSelector
                 selectedLayout={selectedLayout}
+                selectedCustomLayoutId={selectedCustomLayoutId}
                 onLayoutSelect={handleLayoutSelect}
               />
               <div className="border-t border-card-border">
                 <SlotAssignment
                   layoutType={selectedLayout}
+                  customLayout={selectedCustomLayout}
                   slotAssignments={slotAssignments}
                   channels={channels}
                   audioSource={audioSource}

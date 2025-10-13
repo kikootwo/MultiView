@@ -1,10 +1,11 @@
 'use client';
 
-import { Channel, LayoutType } from '@/types';
+import { Channel, LayoutType, CustomLayout } from '@/types';
 import { getLayoutDefinition, getSlotLabel } from '@/lib/layouts';
 
 interface SlotAssignmentProps {
   layoutType: LayoutType;
+  customLayout?: CustomLayout | null;
   slotAssignments: Record<string, string>; // slotId -> channelId
   channels: Channel[];
   audioSource: string | null;
@@ -18,6 +19,7 @@ interface SlotAssignmentProps {
 
 export default function SlotAssignment({
   layoutType,
+  customLayout,
   slotAssignments,
   channels,
   audioSource,
@@ -28,10 +30,17 @@ export default function SlotAssignment({
   isLoading,
   canApply,
 }: SlotAssignmentProps) {
-  const layout = getLayoutDefinition(layoutType);
+  // Handle custom layouts
+  let slots: string[] = [];
 
-  if (!layout) {
-    return <div className="p-4 text-muted">Invalid layout selected</div>;
+  if (layoutType === 'custom' && customLayout) {
+    slots = customLayout.slots.map(s => s.id);
+  } else {
+    const layout = getLayoutDefinition(layoutType);
+    if (!layout) {
+      return <div className="p-4 text-muted">Invalid layout selected</div>;
+    }
+    slots = layout.slots;
   }
 
   const getChannelById = (channelId: string | null): Channel | null => {
@@ -53,19 +62,28 @@ export default function SlotAssignment({
     return `${apiUrl}/api/proxy-image?url=${encodeURIComponent(iconUrl)}`;
   };
 
-  const assignedSlots = layout.slots.filter(slotId => slotAssignments[slotId]);
+  const assignedSlots = slots.filter(slotId => slotAssignments[slotId]);
+
+  // Get slot display name
+  const getSlotDisplayName = (slotId: string): string => {
+    if (layoutType === 'custom' && customLayout) {
+      const slot = customLayout.slots.find(s => s.id === slotId);
+      return slot?.name || slotId;
+    }
+    return getSlotLabel(slotId);
+  };
 
   return (
     <div className="p-4 pb-6">
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-lg font-semibold text-foreground">Stream Assignment</h2>
         <div className="text-sm text-muted">
-          {assignedSlots.length} / {layout.slots.length} slots filled
+          {assignedSlots.length} / {slots.length} slots filled
         </div>
       </div>
 
       <div className="space-y-3">
-        {layout.slots.map((slotId) => {
+        {slots.map((slotId) => {
           const channelId = slotAssignments[slotId];
           const channel = getChannelById(channelId);
           const isAudioSource = audioSource === slotId;
@@ -86,7 +104,7 @@ export default function SlotAssignment({
                 {/* Slot label */}
                 <div className="flex-shrink-0">
                   <div className="text-sm font-medium text-foreground">
-                    {getSlotLabel(slotId)}
+                    {getSlotDisplayName(slotId)}
                   </div>
                 </div>
 
