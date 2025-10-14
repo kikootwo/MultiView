@@ -7,7 +7,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY server.py /app/server.py
-RUN pip3 install --no-cache-dir fastapi uvicorn[standard]
+RUN pip3 install --no-cache-dir fastapi uvicorn[standard] pyzmq
 
 # Environment variables with defaults
 ENV PORT=9292

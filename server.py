@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Dict, Set
+import zmq
 
 app = FastAPI()
 
@@ -63,9 +64,78 @@ CHANNELS_LOCK = threading.Lock()
 CURRENT_LAYOUT = None
 CURRENT_LAYOUT_LOCK = threading.Lock()
 
+# Last layout configuration (persists through idle mode for cold start)
+LAST_LAYOUT = None
+LAST_LAYOUT_LOCK = threading.Lock()
+
 # Broadcast system for streaming to multiple clients
 BROADCAST_CLIENTS: Set[queue.Queue] = set()
 BROADCAST_LOCK = threading.Lock()
+
+# ========== Audio Volume Control with ZeroMQ ==========
+
+class AudioVolumeController:
+    """Manages dynamic audio volume control via ZeroMQ sockets."""
+
+    def __init__(self):
+        self.context = zmq.Context()
+        self.sockets = {}  # stream_index → socket
+        self.lock = threading.Lock()
+
+    def create_socket(self, stream_index: int) -> str:
+        """Create ZMQ socket for stream, return bind address."""
+        with self.lock:
+            # Clean up existing socket if any
+            if stream_index in self.sockets:
+                try:
+                    self.sockets[stream_index].close()
+                except:
+                    pass
+
+            socket = self.context.socket(zmq.REQ)
+            address = f"ipc:///tmp/zmq-stream-{stream_index}"
+            socket.connect(address)
+            socket.setsockopt(zmq.RCVTIMEO, 1000)  # 1 second timeout
+            socket.setsockopt(zmq.SNDTIMEO, 1000)
+            self.sockets[stream_index] = socket
+            return address
+
+    def set_volume(self, stream_index: int, volume: float) -> bool:
+        """Send volume command to FFmpeg via ZMQ. Returns True on success."""
+        with self.lock:
+            if stream_index not in self.sockets:
+                print(f"No ZMQ socket for stream {stream_index}")
+                return False
+
+            try:
+                # Send ZMQ command: "volume <value>"
+                command = f"volume {volume}"
+                self.sockets[stream_index].send_string(command)
+                # Wait for ACK
+                response = self.sockets[stream_index].recv_string()
+                print(f"Set volume for stream {stream_index} to {volume}: {response}")
+                return True
+            except zmq.error.Again:
+                print(f"ZMQ timeout setting volume for stream {stream_index}")
+                return False
+            except Exception as e:
+                print(f"Error setting volume for stream {stream_index}: {e}")
+                return False
+
+    def cleanup(self):
+        """Close all sockets."""
+        with self.lock:
+            for socket in self.sockets.values():
+                try:
+                    socket.close()
+                except:
+                    pass
+            self.sockets.clear()
+
+# Global audio controller
+audio_controller = AudioVolumeController()
+
+# ========== End Audio Volume Control ==========
 
 # Pydantic models for API
 class LayoutConfigModel(BaseModel):
@@ -73,6 +143,7 @@ class LayoutConfigModel(BaseModel):
     streams: Dict[str, str]  # slotId -> channelId
     audio_source: str  # slotId providing audio
     custom_slots: list = None  # For custom layouts: [{ id, name, x, y, width, height }]
+    audio_volumes: Dict[str, float] = None  # slotId -> volume (0.0-1.0), optional
 
 app.mount("/hls", StaticFiles(directory=OUTDIR), name="hls")
 
@@ -251,42 +322,92 @@ def build_live_cmd(in1: str, in2: str, audio_mode: int):
     # Legacy function for backward compatibility - delegates to build_layout_cmd
     return build_layout_cmd('pip', [in1, in2], audio_mode)
 
-def build_layout_cmd(layout: str, input_urls: list, audio_index: int, custom_slots: list = None):
+def build_audio_filter(num_streams: int, audio_volumes: dict = None) -> str:
+    """
+    Build audio filter with volume controls for each stream.
+
+    Args:
+        num_streams: Number of audio streams
+        audio_volumes: Dict mapping stream index to volume (0.0-1.0). If None, all default to 1.0
+
+    Returns:
+        Audio filter_complex string
+    """
+    if num_streams == 0:
+        return ""
+
+    if audio_volumes is None:
+        audio_volumes = {}
+
+    audio_parts = []
+
+    # Create volume filter for each audio stream
+    for i in range(num_streams):
+        volume = audio_volumes.get(i, 1.0)
+
+        # Format audio and apply volume
+        audio_filter = (
+            f"[{i}:a]"
+            f"aformat=sample_rates=48000:channel_layouts=stereo,"
+            f"volume={volume}"
+            f"[a{i}]"
+        )
+        audio_parts.append(audio_filter)
+
+    # Mix all audio streams if multiple, otherwise just use the single stream
+    if num_streams > 1:
+        inputs = ''.join(f"[a{i}]" for i in range(num_streams))
+        mix_filter = f"{inputs}amix=inputs={num_streams}:duration=longest:normalize=0[aout]"
+        audio_parts.append(mix_filter)
+    else:
+        # Single stream, just pass through
+        audio_parts.append("[a0]anull[aout]")
+
+    return ";".join(audio_parts)
+
+def build_layout_cmd(layout: str, input_urls: list, audio_index: int, custom_slots: list = None, audio_volumes: dict = None):
     """
     Build FFmpeg command for any layout type.
 
     Args:
         layout: Layout type ('pip', 'split_h', 'split_v', 'grid_2x2', 'multi_pip_2', 'multi_pip_3', 'multi_pip_4', 'custom')
         input_urls: List of input stream URLs (in slot order)
-        audio_index: Index of input to use for audio (0-based)
+        audio_index: Index of input to use for audio (0-based) - DEPRECATED, kept for compatibility
         custom_slots: For custom layouts, list of slot definitions with x, y, width, height
+        audio_volumes: Dict mapping stream index to volume (0.0-1.0)
     """
-    # Build filter_complex based on layout
+    # Build video filter_complex based on layout
     if layout == 'pip':
-        fc = build_pip_filter(input_urls)
+        video_fc = build_pip_filter(input_urls)
     elif layout == 'dvd_pip':
-        fc = build_dvd_pip_filter(input_urls)
+        video_fc = build_dvd_pip_filter(input_urls)
     elif layout == 'split_h':
-        fc = build_split_h_filter(input_urls)
+        video_fc = build_split_h_filter(input_urls)
     elif layout == 'split_v':
-        fc = build_split_v_filter(input_urls)
+        video_fc = build_split_v_filter(input_urls)
     elif layout == 'grid_2x2':
-        fc = build_grid_2x2_filter(input_urls)
+        video_fc = build_grid_2x2_filter(input_urls)
     elif layout == 'multi_pip_2':
-        fc = build_multi_pip_2_filter(input_urls)
+        video_fc = build_multi_pip_2_filter(input_urls)
     elif layout == 'multi_pip_3':
-        fc = build_multi_pip_3_filter(input_urls)
+        video_fc = build_multi_pip_3_filter(input_urls)
     elif layout == 'multi_pip_4':
-        fc = build_multi_pip_4_filter(input_urls)
+        video_fc = build_multi_pip_4_filter(input_urls)
     elif layout == 'custom':
         if not custom_slots:
             raise ValueError("Custom layout requires slot definitions")
-        fc = build_custom_layout_filter(custom_slots)
+        video_fc = build_custom_layout_filter(custom_slots)
     else:
         raise ValueError(f"Unknown layout type: {layout}")
 
-    # Build audio mapping
-    amap = ["-map", "[v]", "-map", f"{audio_index}:a?"]
+    # Build audio filter with ZeroMQ controls
+    audio_fc = build_audio_filter(len(input_urls), audio_volumes)
+
+    # Combine video and audio filters
+    fc = f"{video_fc};{audio_fc}"
+
+    # Map both video and audio outputs
+    amap = ["-map", "[v]", "-map", "[aout]"]
 
     # Build ffmpeg command with all inputs
     cmd = ["ffmpeg", "-loglevel", "warning", "-hide_banner", "-nostdin"]
@@ -514,18 +635,31 @@ def clean_outdir():
 
 def stop_to_idle():
     """Stop FFmpeg completely and enter idle mode (zero GPU usage)."""
-    global PROC, MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, LAST_HIT
+    global PROC, MODE, CUR_IN1, CUR_IN2, CUR_AUDIO_MODE, LAST_HIT, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_CUSTOM_SLOTS, CURRENT_LAYOUT, LAST_LAYOUT
+
+    # Save current layout to LAST_LAYOUT before clearing (for cold start)
+    with CURRENT_LAYOUT_LOCK:
+        if CURRENT_LAYOUT:
+            with LAST_LAYOUT_LOCK:
+                LAST_LAYOUT = CURRENT_LAYOUT.copy()
+                print(f"Saved layout '{LAST_LAYOUT.get('layout')}' for cold start")
+
     with LOCK:
         stop_ffmpeg()
         clean_outdir()
         MODE = "idle"
-        # Keep layout config so we can restart on-demand
-        # CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX preserved
+        # Don't clear layout globals - keep them for cold start via LAST_LAYOUT
+        # CUR_LAYOUT, CUR_INPUTS, etc. stay populated for restart_last_layout()
         # Legacy vars cleared
         CUR_IN1 = CUR_IN2 = None
         CUR_AUDIO_MODE = 0
         LAST_HIT = time.time()
-    print(f"Entered idle mode (no FFmpeg process)")
+
+    # Clear current layout state (but LAST_LAYOUT persists)
+    with CURRENT_LAYOUT_LOCK:
+        CURRENT_LAYOUT = None
+
+    print(f"Entered idle mode (no FFmpeg process, layout saved for cold start)")
 
 def start_black():
     """Legacy black screen mode - kept for compatibility."""
@@ -568,6 +702,20 @@ def start_live(in1: str, in2: str):
         CUR_IN1, CUR_IN2 = in1, in2
         LAST_HIT = time.time()
 
+def get_expected_slots_for_layout(layout: str) -> list:
+    """Return the expected slot IDs for a given layout type."""
+    LAYOUT_SLOTS = {
+        'pip': ['main', 'inset'],
+        'dvd_pip': ['main', 'inset'],
+        'split_h': ['left', 'right'],
+        'split_v': ['top', 'bottom'],
+        'grid_2x2': ['slot1', 'slot2', 'slot3', 'slot4'],
+        'multi_pip_2': ['main', 'inset1', 'inset2'],
+        'multi_pip_3': ['main', 'inset1', 'inset2', 'inset3'],
+        'multi_pip_4': ['main', 'inset1', 'inset2', 'inset3', 'inset4'],
+    }
+    return LAYOUT_SLOTS.get(layout, [])
+
 def ensure_running():
     """Legacy: ensure FFmpeg is running - now starts in idle mode instead."""
     # No longer auto-starts black screen
@@ -582,12 +730,32 @@ def restart_last_layout():
         print("Cannot restart: no layout configured")
         return False
 
+    # Get audio_volumes from current layout
+    with CURRENT_LAYOUT_LOCK:
+        audio_volumes = CURRENT_LAYOUT.get("audio_volumes", {}) if CURRENT_LAYOUT else {}
+
+    # Convert slot-based volumes to index-based volumes
+    audio_volumes_by_index = {}
+    if audio_volumes and CURRENT_LAYOUT:
+        # Get expected slots - handle custom layouts
+        if CUR_LAYOUT == 'custom' and CUR_CUSTOM_SLOTS:
+            sorted_slots = sorted(CUR_CUSTOM_SLOTS, key=lambda s: s['width'] * s['height'], reverse=True)
+            expected_slots = [slot['id'] for slot in sorted_slots]
+        else:
+            expected_slots = get_expected_slots_for_layout(CUR_LAYOUT)
+
+        for slot_id, channel_id in CURRENT_LAYOUT.get("streams", {}).items():
+            if slot_id in audio_volumes and slot_id in expected_slots:
+                index = expected_slots.index(slot_id)
+                audio_volumes_by_index[index] = audio_volumes[slot_id]
+
     try:
         with LOCK:
             stop_ffmpeg()
             clean_outdir()
+
             PROC = subprocess.Popen(
-                build_layout_cmd(CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_CUSTOM_SLOTS),
+                build_layout_cmd(CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_CUSTOM_SLOTS, audio_volumes_by_index),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0
@@ -613,11 +781,31 @@ def restart_current_stream():
     elif MODE == "live":
         # Use new layout system if available, otherwise fall back to legacy
         if CUR_LAYOUT and CUR_INPUTS:
+            # Get audio_volumes from current layout
+            with CURRENT_LAYOUT_LOCK:
+                audio_volumes = CURRENT_LAYOUT.get("audio_volumes", {}) if CURRENT_LAYOUT else {}
+
+            # Convert slot-based volumes to index-based volumes
+            audio_volumes_by_index = {}
+            if audio_volumes and CURRENT_LAYOUT:
+                # Get expected slots - handle custom layouts
+                if CUR_LAYOUT == 'custom' and CUR_CUSTOM_SLOTS:
+                    sorted_slots = sorted(CUR_CUSTOM_SLOTS, key=lambda s: s['width'] * s['height'], reverse=True)
+                    expected_slots = [slot['id'] for slot in sorted_slots]
+                else:
+                    expected_slots = get_expected_slots_for_layout(CUR_LAYOUT)
+
+                for slot_id, channel_id in CURRENT_LAYOUT.get("streams", {}).items():
+                    if slot_id in audio_volumes and slot_id in expected_slots:
+                        index = expected_slots.index(slot_id)
+                        audio_volumes_by_index[index] = audio_volumes[slot_id]
+
             with LOCK:
                 stop_ffmpeg()
                 clean_outdir()
+
                 PROC = subprocess.Popen(
-                    build_layout_cmd(CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_CUSTOM_SLOTS),
+                    build_layout_cmd(CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_CUSTOM_SLOTS, audio_volumes_by_index),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     bufsize=0
@@ -629,6 +817,7 @@ def restart_current_stream():
             with LOCK:
                 stop_ffmpeg()
                 clean_outdir()
+
                 PROC = subprocess.Popen(
                     build_live_cmd(CUR_IN1, CUR_IN2, CUR_AUDIO_MODE),
                     stdout=subprocess.PIPE,
@@ -768,6 +957,10 @@ async def status():
     with CURRENT_LAYOUT_LOCK:
         current_layout = CURRENT_LAYOUT.copy() if CURRENT_LAYOUT else None
 
+    # Get last layout (for cold start info)
+    with LAST_LAYOUT_LOCK:
+        last_layout = LAST_LAYOUT.copy() if LAST_LAYOUT else None
+
     return {
         "proc_running": running,
         "mode": MODE,
@@ -778,6 +971,7 @@ async def status():
         "time_until_idle": int(time_until_timeout),
         "connected_clients": client_count,
         "current_layout": current_layout,
+        "last_layout": last_layout,  # Layout that will be restored on cold start
         "stream_url": f"http://localhost:{port}/stream",
     }
 
@@ -788,15 +982,115 @@ async def stream():
     Each client starts receiving from the current live point.
     Multiple clients can connect simultaneously.
     """
-    global LAST_HIT, BROADCAST_CLIENTS, MODE
+    global LAST_HIT, BROADCAST_CLIENTS, MODE, LAST_LAYOUT, CURRENT_LAYOUT, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_CUSTOM_SLOTS, PROC
     LAST_HIT = time.time()
 
-    # Start FFmpeg on-demand if in idle mode
-    if MODE == "idle" and CUR_LAYOUT:
-        print("Client connected while idle, restarting last layout...")
-        if not restart_last_layout():
-            raise HTTPException(status_code=503, detail="Failed to start stream")
-        await asyncio.sleep(2)  # Give FFmpeg a moment to start
+    # Start FFmpeg on-demand if in idle mode (cold start)
+    # Use LOCK to prevent race conditions with multiple simultaneous stream requests
+    should_start = False
+    with LOCK:
+        if MODE == "idle":
+            should_start = True
+            MODE = "starting"  # Prevent other requests from starting simultaneously
+
+    if should_start:
+        try:
+            # Copy LAST_LAYOUT outside of lock to avoid deadlock
+            saved_layout = None
+            with LAST_LAYOUT_LOCK:
+                if LAST_LAYOUT:
+                    saved_layout = LAST_LAYOUT.copy()
+
+            if not saved_layout:
+                with LOCK:
+                    MODE = "idle"  # Reset mode
+                raise HTTPException(status_code=503, detail="No saved layout available for cold start")
+
+            print(f"Client connected while idle, restoring layout '{saved_layout.get('layout')}'...")
+
+            # Restore layout state from saved copy
+            with CURRENT_LAYOUT_LOCK:
+                CURRENT_LAYOUT = saved_layout.copy()
+
+            # Extract layout parameters for restart
+            layout_type = saved_layout.get("layout")
+            streams = saved_layout.get("streams", {})
+            audio_volumes = saved_layout.get("audio_volumes", {})
+            custom_slots = saved_layout.get("custom_slots")
+
+            # Build input URLs in correct order
+            if layout_type == 'custom' and custom_slots:
+                sorted_slots = sorted(custom_slots, key=lambda s: s['width'] * s['height'], reverse=True)
+                expected_slots = [slot['id'] for slot in sorted_slots]
+            else:
+                expected_slots = get_expected_slots_for_layout(layout_type)
+
+            # Get channel URLs
+            input_urls = []
+            for slot_id in expected_slots:
+                channel_id = streams.get(slot_id)
+                if channel_id:
+                    channel = get_channel_by_id(channel_id)
+                    if channel:
+                        input_urls.append(channel['url'])
+
+            if not input_urls:
+                with LOCK:
+                    MODE = "idle"
+                raise HTTPException(status_code=503, detail="No valid channel URLs found")
+
+            # Find audio index
+            audio_source = saved_layout.get("audio_source")
+            audio_index = expected_slots.index(audio_source) if audio_source in expected_slots else 0
+
+            # Convert slot-based audio volumes to index-based
+            audio_volumes_by_index = {}
+            for slot_id, volume in audio_volumes.items():
+                if slot_id in expected_slots:
+                    idx = expected_slots.index(slot_id)
+                    audio_volumes_by_index[idx] = volume
+
+            # Build custom slots for ffmpeg if needed
+            custom_slots_for_ffmpeg = None
+            if layout_type == 'custom' and custom_slots:
+                custom_slots_for_ffmpeg = sorted(custom_slots, key=lambda s: s['width'] * s['height'], reverse=True)
+
+            # Start FFmpeg directly (don't use restart_last_layout to avoid complexity)
+            with LOCK:
+                stop_ffmpeg()
+                clean_outdir()
+
+                PROC = subprocess.Popen(
+                    build_layout_cmd(layout_type, input_urls, audio_index, custom_slots_for_ffmpeg, audio_volumes_by_index),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=0
+                )
+                MODE = "live"
+                CUR_LAYOUT = layout_type
+                CUR_INPUTS = input_urls
+                CUR_AUDIO_INDEX = audio_index
+                CUR_CUSTOM_SLOTS = custom_slots_for_ffmpeg
+                LAST_HIT = time.time()
+
+            print(f"Cold start successful: layout '{layout_type}' with {len(input_urls)} streams")
+
+            # Wait for FFmpeg to stabilize and start producing MPEG-TS output
+            # Streams need time to connect, buffer, and begin encoding
+            await asyncio.sleep(5)
+
+            # Check if FFmpeg is still running
+            if not PROC or PROC.poll() is not None:
+                with LOCK:
+                    MODE = "idle"
+                raise HTTPException(status_code=503, detail="FFmpeg process died during cold start")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            with LOCK:
+                MODE = "idle"
+            raise HTTPException(status_code=503, detail=f"Cold start failed: {str(e)}")
 
     # Create a queue for this client (threading.Queue, not asyncio)
     client_queue = queue.Queue(maxsize=100)
@@ -806,7 +1100,7 @@ async def stream():
         BROADCAST_CLIENTS.add(client_queue)
 
     async def generate():
-        global LAST_HIT
+        global LAST_HIT, PROC
         try:
             while True:
                 # Wait for data from the broadcaster (blocking with timeout)
@@ -992,12 +1286,30 @@ async def set_layout(config: LayoutConfigModel):
 
         custom_slots_for_ffmpeg = None
 
+    # Convert slot-based audio_volumes to index-based volumes
+    audio_volumes_by_index = {}
+    if config.audio_volumes:
+        for slot_id, volume in config.audio_volumes.items():
+            if slot_id in expected_slots:
+                index = expected_slots.index(slot_id)
+                audio_volumes_by_index[index] = volume
+
+    # Initialize default volumes for slots without explicit volumes
+    # First slot gets 1.0, others get 0.0 if not specified
+    for i, slot_id in enumerate(expected_slots):
+        if i not in audio_volumes_by_index:
+            # First slot defaults to 1.0 (100%), all others to 0.0 (muted)
+            if i == 0:
+                audio_volumes_by_index[i] = 1.0
+            else:
+                audio_volumes_by_index[i] = 0.0
+
     # Start the stream - optimistic restart for speed
     try:
         with LOCK:
             # Start new process first
             new_proc = subprocess.Popen(
-                build_layout_cmd(config.layout, input_urls, audio_index, custom_slots_for_ffmpeg),
+                build_layout_cmd(config.layout, input_urls, audio_index, custom_slots_for_ffmpeg, audio_volumes_by_index),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0
@@ -1025,15 +1337,27 @@ async def set_layout(config: LayoutConfigModel):
                 CUR_AUDIO_MODE = audio_index if audio_index in [0, 1] else 0
             LAST_HIT = time.time()
 
-        # Store current layout config
+        # Store current layout config (with slot-based volumes)
         with CURRENT_LAYOUT_LOCK:
-            CURRENT_LAYOUT = config.dict()
+            config_dict = config.dict()
+            # Store the converted index-based volumes back as slot-based for consistency
+            if not config_dict.get("audio_volumes"):
+                config_dict["audio_volumes"] = {}
+            for i, volume in audio_volumes_by_index.items():
+                if i < len(expected_slots):
+                    config_dict["audio_volumes"][expected_slots[i]] = volume
+            CURRENT_LAYOUT = config_dict
+
+            # Also save to LAST_LAYOUT for cold start persistence
+            with LAST_LAYOUT_LOCK:
+                LAST_LAYOUT = config_dict.copy()
 
         return {
             "status": "success",
             "message": f"Layout '{config.layout}' started with {len(input_urls)} streams",
             "audio_source": config.audio_source,
             "streams": {slot: name for slot, name in zip(expected_slots, channel_names)},
+            "audio_volumes": audio_volumes_by_index,
         }
     except Exception as e:
         import traceback
@@ -1047,3 +1371,146 @@ async def get_current_layout():
         if CURRENT_LAYOUT is None:
             return {"layout": None, "message": "No layout is currently active"}
         return CURRENT_LAYOUT
+
+# ========== Audio Control API ==========
+
+class VolumeControlModel(BaseModel):
+    slot_id: str  # Slot ID (e.g., 'main', 'inset', 'left', 'right')
+    volume: float  # Volume level (0.0-1.0)
+
+@app.post("/api/audio/volume")
+async def set_audio_volume(control: VolumeControlModel):
+    """
+    Set volume for a specific slot in the current layout.
+    Applies change via smart restart (1-2 second interruption).
+
+    Args:
+        slot_id: Slot identifier (e.g., 'main', 'inset', 'left', 'right')
+        volume: Volume level from 0.0 (mute) to 1.0 (full volume)
+
+    Returns:
+        Status and updated volume information
+    """
+    global MODE, PROC, LAST_HIT, CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_CUSTOM_SLOTS
+
+    # Validate volume range
+    if not 0.0 <= control.volume <= 1.0:
+        raise HTTPException(status_code=400, detail="Volume must be between 0.0 and 1.0")
+
+    with CURRENT_LAYOUT_LOCK:
+        if not CURRENT_LAYOUT:
+            raise HTTPException(status_code=400, detail="No layout is currently active")
+
+        layout_type = CURRENT_LAYOUT.get("layout")
+        streams = CURRENT_LAYOUT.get("streams", {})
+
+        # Validate slot exists in current layout
+        if control.slot_id not in streams:
+            raise HTTPException(status_code=404, detail=f"Slot '{control.slot_id}' not found in current layout")
+
+        # Get expected slots for the layout
+        if layout_type == 'custom':
+            # For custom layouts, get slots from the custom_slots config
+            custom_slots = CURRENT_LAYOUT.get("custom_slots", [])
+            if custom_slots:
+                # Sort by size (same order as used in set_layout)
+                sorted_slots = sorted(custom_slots, key=lambda s: s['width'] * s['height'], reverse=True)
+                expected_slots = [slot['id'] for slot in sorted_slots]
+            else:
+                raise HTTPException(status_code=400, detail="Custom layout missing slot definitions")
+        else:
+            expected_slots = get_expected_slots_for_layout(layout_type)
+
+        if control.slot_id not in expected_slots:
+            raise HTTPException(status_code=404, detail=f"Slot '{control.slot_id}' is not valid for layout '{layout_type}'")
+
+        # Update stored volume in layout config
+        if "audio_volumes" not in CURRENT_LAYOUT:
+            CURRENT_LAYOUT["audio_volumes"] = {}
+        CURRENT_LAYOUT["audio_volumes"][control.slot_id] = control.volume
+
+        # Also update LAST_LAYOUT for cold start persistence
+        with LAST_LAYOUT_LOCK:
+            if LAST_LAYOUT:
+                if "audio_volumes" not in LAST_LAYOUT:
+                    LAST_LAYOUT["audio_volumes"] = {}
+                LAST_LAYOUT["audio_volumes"][control.slot_id] = control.volume
+
+        # Find the stream index for this slot
+        stream_index = expected_slots.index(control.slot_id)
+
+    # Convert slot-based volumes to index-based for FFmpeg
+    audio_volumes_by_index = {}
+    with CURRENT_LAYOUT_LOCK:
+        # Get expected slots again (outside the lock we had it, but need it here too)
+        layout_type = CURRENT_LAYOUT.get("layout")
+        if layout_type == 'custom':
+            custom_slots = CURRENT_LAYOUT.get("custom_slots", [])
+            if custom_slots:
+                sorted_slots = sorted(custom_slots, key=lambda s: s['width'] * s['height'], reverse=True)
+                expected_slots_for_index = [slot['id'] for slot in sorted_slots]
+            else:
+                expected_slots_for_index = expected_slots
+        else:
+            expected_slots_for_index = expected_slots
+
+        for slot_id, volume in CURRENT_LAYOUT.get("audio_volumes", {}).items():
+            if slot_id in expected_slots_for_index:
+                idx = expected_slots_for_index.index(slot_id)
+                audio_volumes_by_index[idx] = volume
+
+    # Restart FFmpeg with new volumes (smart restart for minimal interruption)
+    try:
+        with LOCK:
+            if MODE != "live" or not CUR_LAYOUT or not CUR_INPUTS:
+                return {
+                    "status": "success",
+                    "slot_id": control.slot_id,
+                    "volume": control.volume,
+                    "message": "Volume updated in state (stream not active)"
+                }
+
+            # Start new process with updated volumes
+            new_proc = subprocess.Popen(
+                build_layout_cmd(CUR_LAYOUT, CUR_INPUTS, CUR_AUDIO_INDEX, CUR_CUSTOM_SLOTS, audio_volumes_by_index),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0
+            )
+
+            # Kill old process immediately
+            old_proc = PROC
+            if old_proc and old_proc.poll() is None:
+                try:
+                    old_proc.kill()
+                except:
+                    pass
+
+            # Swap to new process
+            PROC = new_proc
+            LAST_HIT = time.time()
+
+        return {
+            "status": "success",
+            "slot_id": control.slot_id,
+            "volume": control.volume,
+            "stream_index": stream_index,
+            "message": "Volume updated (stream restarted)"
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to apply volume change: {str(e)}")
+
+@app.get("/api/audio/volumes")
+async def get_audio_volumes():
+    """Get current volume levels for all slots in the active layout."""
+    with CURRENT_LAYOUT_LOCK:
+        if not CURRENT_LAYOUT:
+            return {"volumes": {}, "message": "No layout is currently active"}
+
+        return {
+            "volumes": CURRENT_LAYOUT.get("audio_volumes", {}),
+            "layout": CURRENT_LAYOUT.get("layout"),
+            "streams": CURRENT_LAYOUT.get("streams", {}),
+        }

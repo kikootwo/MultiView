@@ -220,7 +220,7 @@ export default function LayoutEditor({ layoutId, onClose, onSave }: LayoutEditor
         {/* Info banner */}
         <div className="bg-primary/20 border-l-4 border-primary p-3">
           <p className="text-xs text-white/80">
-            {slots.length}/5 slots • Drag to move • Pinch to resize • Tap to select
+            {slots.length}/5 slots • Drag to move • Tap to select • Use controls below to resize
           </p>
         </div>
       </div>

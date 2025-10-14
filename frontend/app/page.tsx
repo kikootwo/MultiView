@@ -8,6 +8,7 @@ import ChannelList from '@/components/ChannelList';
 import LayoutSelector from '@/components/LayoutSelector';
 import SlotAssignment from '@/components/SlotAssignment';
 import StatusDisplay from '@/components/StatusDisplay';
+import VolumeControls from '@/components/VolumeControls';
 
 export default function Home() {
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -15,18 +16,40 @@ export default function Home() {
   const [selectedCustomLayoutId, setSelectedCustomLayoutId] = useState<string | null>(null);
   const [selectedCustomLayout, setSelectedCustomLayout] = useState<CustomLayout | null>(null);
   const [slotAssignments, setSlotAssignments] = useState<Record<string, string>>({});
+  const [activeSlotAssignments, setActiveSlotAssignments] = useState<Record<string, string>>({}); // Actually applied layout
   const [audioSource, setAudioSource] = useState<string | null>(null);
   const [activeSlot, setActiveSlot] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [view, setView] = useState<'layout' | 'channels'>('layout');
+  const [isStreamActive, setIsStreamActive] = useState(false);
 
   // Load channels and current layout on mount
   useEffect(() => {
     loadChannels();
     loadCurrentLayout();
+    checkStreamStatus(); // Initial status check
   }, []);
+
+  // Poll stream status every 5 seconds to detect idle
+  useEffect(() => {
+    const interval = setInterval(() => {
+      checkStreamStatus();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const checkStreamStatus = async () => {
+    try {
+      const status = await api.getStatus();
+      const isActive = status.mode === 'live' && status.proc_running;
+      setIsStreamActive(isActive);
+      // Backend will clear layout when idle, which we'll pick up on next page load
+    } catch (err) {
+      console.error('Failed to check status:', err);
+    }
+  };
 
   const loadCurrentLayout = async () => {
     try {
@@ -34,7 +57,11 @@ export default function Home() {
       if (layout && layout.layout) {
         setSelectedLayout(layout.layout as LayoutType);
         setSlotAssignments(layout.streams || {});
+        setActiveSlotAssignments(layout.streams || {}); // Set active assignments too
         setAudioSource(layout.audio_source || null);
+        // Layout exists, mark stream as potentially active
+        // (will be confirmed by status check)
+        checkStreamStatus();
 
         // Handle custom layout restoration
         if (layout.layout === 'custom' && layout.custom_slots) {
@@ -122,7 +149,31 @@ export default function Home() {
 
   const handleChannelSelect = (channel: Channel) => {
     if (activeSlot) {
-      const newAssignments = { ...slotAssignments, [activeSlot]: channel.id };
+      // Check if this channel is already assigned to another slot
+      const existingSlot = Object.entries(slotAssignments).find(
+        ([slotId, channelId]) => slotId !== activeSlot && channelId === channel.id
+      );
+
+      const newAssignments = { ...slotAssignments };
+
+      if (existingSlot) {
+        // Swap: move selected channel to active slot, and move active slot's channel (if any) to existing slot
+        const [existingSlotId] = existingSlot;
+        const currentChannelInActiveSlot = slotAssignments[activeSlot];
+
+        newAssignments[activeSlot] = channel.id;
+        if (currentChannelInActiveSlot) {
+          // Swap - put active slot's channel into the other slot
+          newAssignments[existingSlotId] = currentChannelInActiveSlot;
+        } else {
+          // No channel in active slot, just remove from existing slot
+          delete newAssignments[existingSlotId];
+        }
+      } else {
+        // Normal assignment
+        newAssignments[activeSlot] = channel.id;
+      }
+
       setSlotAssignments(newAssignments);
 
       // Auto-set first assigned channel as audio source
@@ -135,12 +186,16 @@ export default function Home() {
     }
   };
 
-  // Get list of channel IDs already assigned to OTHER slots (not the active one)
-  const getAssignedChannelIds = (): string[] => {
-    if (!activeSlot) return [];
-    return Object.entries(slotAssignments)
-      .filter(([slotId]) => slotId !== activeSlot)
-      .map(([, channelId]) => channelId);
+  // Get mapping of already assigned channels for swap UI indication
+  const getAssignedChannelSlots = (): Record<string, string> => {
+    if (!activeSlot) return {};
+    const mapping: Record<string, string> = {};
+    Object.entries(slotAssignments).forEach(([slotId, channelId]) => {
+      if (slotId !== activeSlot) {
+        mapping[channelId] = slotId;
+      }
+    });
+    return mapping;
   };
 
   const handleAudioSourceChange = (slotId: string) => {
@@ -191,38 +246,9 @@ export default function Home() {
       // Send layout request
       await api.setLayout(layoutRequest);
 
-      // Poll status until stream is confirmed running
-      setSuccess('⏳ Connecting to streams...');
-
-      let attempts = 0;
-      const maxAttempts = 30; // 30 seconds max
-
-      const pollStatus = async (): Promise<boolean> => {
-        try {
-          const status = await api.getStatus();
-
-          if (status.mode === 'live' && status.proc_running) {
-            return true; // Stream is live!
-          }
-
-          attempts++;
-          if (attempts >= maxAttempts) {
-            throw new Error('Stream startup timeout');
-          }
-
-          // Update progress message
-          const elapsed = attempts;
-          setSuccess(`⏳ Connecting to streams... (${elapsed}s)`);
-
-          // Wait 1 second and try again
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          return pollStatus();
-        } catch {
-          throw new Error('Failed to verify stream status');
-        }
-      };
-
-      await pollStatus();
+      // Mark stream as active and save the active assignments
+      setIsStreamActive(true);
+      setActiveSlotAssignments(slotAssignments);
 
       setSuccess('⭐ Layout applied successfully!');
       setTimeout(() => setSuccess(null), 3000);
@@ -244,8 +270,10 @@ export default function Home() {
       await api.stop();
       // Clear the UI state
       setSlotAssignments({});
+      setActiveSlotAssignments({});
       setAudioSource(null);
       setActiveSlot(null);
+      setIsStreamActive(false);
       setSuccess('Stream stopped (standby mode)');
       setTimeout(() => setSuccess(null), 3000);
     } catch (err) {
@@ -334,6 +362,16 @@ export default function Home() {
                   canApply={canApply}
                 />
               </div>
+              {/* Volume Controls - only show when stream is active with applied layout */}
+              {isStreamActive && Object.keys(activeSlotAssignments).length > 0 && (
+                <div className="border-t border-card-border">
+                  <VolumeControls
+                    slotAssignments={activeSlotAssignments}
+                    channels={channels}
+                    layoutType={selectedLayout}
+                  />
+                </div>
+              )}
             </div>
           </div>
 
@@ -359,7 +397,7 @@ export default function Home() {
               channels={channels}
               onChannelSelect={handleChannelSelect}
               selectedChannelId={activeSlot ? slotAssignments[activeSlot] : null}
-              disabledChannelIds={getAssignedChannelIds()}
+              assignedChannelSlots={getAssignedChannelSlots()}
               onRefresh={handleRefreshChannels}
               isRefreshing={isLoading}
             />

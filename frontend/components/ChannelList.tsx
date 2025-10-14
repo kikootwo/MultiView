@@ -7,7 +7,7 @@ interface ChannelListProps {
   channels: Channel[];
   onChannelSelect: (channel: Channel) => void;
   selectedChannelId?: string | null;
-  disabledChannelIds?: string[];
+  assignedChannelSlots?: Record<string, string>; // channelId -> slotId mapping
   onRefresh?: () => void;
   isRefreshing?: boolean;
 }
@@ -16,7 +16,7 @@ export default function ChannelList({
   channels,
   onChannelSelect,
   selectedChannelId,
-  disabledChannelIds = [],
+  assignedChannelSlots = {},
   onRefresh,
   isRefreshing = false,
 }: ChannelListProps) {
@@ -76,21 +76,21 @@ export default function ChannelList({
         ) : (
           <div className="divide-y divide-card-border">
             {filteredChannels.map((channel) => {
-              const isDisabled = disabledChannelIds.includes(channel.id);
+              const assignedToSlot = assignedChannelSlots[channel.id];
               const isSelected = selectedChannelId === channel.id;
+              const willSwap = !!assignedToSlot;
 
               return (
                 <button
                   key={channel.id}
-                  onClick={() => !isDisabled && onChannelSelect(channel)}
-                  disabled={isDisabled}
-                  className={`w-full flex items-center gap-3 p-3 transition-all ${
-                    isDisabled
-                      ? 'opacity-40 cursor-not-allowed'
-                      : 'hover:bg-primary hover:bg-opacity-5 hover:shadow-sm'
-                  } ${
+                  onClick={() => onChannelSelect(channel)}
+                  className={`w-full flex items-center gap-3 p-3 transition-all hover:bg-primary hover:bg-opacity-5 hover:shadow-sm ${
                     isSelected
-                      ? 'bg-primary bg-opacity-10 shadow-sm'
+                      ? 'border-l-4 border-primary'
+                      : ''
+                  } ${
+                    willSwap
+                      ? 'border-l-4 border-accent'
                       : ''
                   }`}
                 >
@@ -115,8 +115,12 @@ export default function ChannelList({
                   <div className="flex-1 text-left">
                     <div className="font-medium text-foreground">
                       {channel.name}
-                      {isDisabled && <span className="ml-2 text-xs text-muted">(assigned)</span>}
                     </div>
+                    {willSwap && (
+                      <div className="text-xs text-accent font-semibold mt-1">
+                        Assigned to: {assignedToSlot}
+                      </div>
+                    )}
                   </div>
                 </button>
               );

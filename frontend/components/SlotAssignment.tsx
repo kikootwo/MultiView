@@ -131,13 +131,6 @@ export default function SlotAssignment({
                     <div className="flex-1 text-left">
                       <div className="font-medium text-foreground">{channel.name}</div>
                     </div>
-
-                    {/* Audio indicator */}
-                    {isAudioSource && (
-                      <div className="flex-shrink-0 px-2.5 py-1 bg-gradient-to-r from-success to-emerald-500 text-white text-xs font-medium rounded-full shadow-md">
-                        🔊 Audio
-                      </div>
-                    )}
                   </>
                 ) : (
                   <div className="flex-1 text-left text-muted">
@@ -145,18 +138,6 @@ export default function SlotAssignment({
                   </div>
                 )}
               </button>
-
-              {/* Audio source selector (only show if slot has a channel) */}
-              {channel && !isAudioSource && (
-                <div className="border-t border-card-border px-4 py-2 bg-card">
-                  <button
-                    onClick={() => onAudioSourceChange(slotId)}
-                    className="text-sm text-primary hover:text-accent font-medium transition-colors"
-                  >
-                    Set as audio source
-                  </button>
-                </div>
-              )}
             </div>
           );
         })}

@@ -2,7 +2,7 @@
 
 import { CustomLayoutSlot } from '@/types';
 import { getSlotColor, updateSlotPosition, updateSlotWidth } from '@/lib/layoutEditorUtils';
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 
 type ResizeHandle = 'tl' | 'tr' | 'bl' | 'br' | null;
 
@@ -37,6 +37,94 @@ export default function StreamSlot({
   } | null>(null);
   const slotRef = useRef<HTMLDivElement>(null);
 
+  // Handle global mouse events for drag/resize
+  useEffect(() => {
+    const handleGlobalMouseMove = (e: MouseEvent) => {
+      if (isResizing && resizeStartRef.current && activeHandle) {
+        e.preventDefault();
+        // Resize gesture
+        const deltaX = (e.clientX - resizeStartRef.current.x) / scale;
+        const deltaY = (e.clientY - resizeStartRef.current.y) / scale;
+
+        let newWidth = resizeStartRef.current.slotWidth;
+        let newX = resizeStartRef.current.slotX;
+        let newY = resizeStartRef.current.slotY;
+
+        // Calculate new dimensions based on which handle is being dragged
+        switch (activeHandle) {
+          case 'br': // Bottom-right: increase width/height
+            newWidth = resizeStartRef.current.slotWidth + deltaX;
+            break;
+          case 'bl': // Bottom-left: decrease width from left, increase height
+            newWidth = resizeStartRef.current.slotWidth - deltaX;
+            newX = resizeStartRef.current.slotX + deltaX;
+            break;
+          case 'tr': // Top-right: increase width, decrease height from top
+            newWidth = resizeStartRef.current.slotWidth + deltaX;
+            newY = resizeStartRef.current.slotY + deltaY;
+            break;
+          case 'tl': // Top-left: decrease both from top-left
+            newWidth = resizeStartRef.current.slotWidth - deltaX;
+            newX = resizeStartRef.current.slotX + deltaX;
+            newY = resizeStartRef.current.slotY + deltaY;
+            break;
+        }
+
+        // Apply width change (this maintains 16:9 aspect ratio)
+        const updatedSlot = updateSlotWidth({ ...slot, x: newX, y: newY }, newWidth);
+
+        // Ensure slot stays within canvas bounds
+        const clampedSlot = updateSlotPosition(updatedSlot, updatedSlot.x, updatedSlot.y);
+        onUpdate(clampedSlot);
+
+      } else if (isDragging && dragStartRef.current) {
+        e.preventDefault();
+        // Drag gesture - move slot
+        const deltaX = (e.clientX - dragStartRef.current.x) / scale;
+        const deltaY = (e.clientY - dragStartRef.current.y) / scale;
+
+        const newX = dragStartRef.current.slotX + deltaX;
+        const newY = dragStartRef.current.slotY + deltaY;
+
+        const updatedSlot = updateSlotPosition(slot, newX, newY);
+        onUpdate(updatedSlot);
+      }
+    };
+
+    const handleGlobalMouseUp = () => {
+      setIsDragging(false);
+      setIsResizing(false);
+      setActiveHandle(null);
+      dragStartRef.current = null;
+      resizeStartRef.current = null;
+    };
+
+    if (isDragging || isResizing) {
+      window.addEventListener('mousemove', handleGlobalMouseMove);
+      window.addEventListener('mouseup', handleGlobalMouseUp);
+
+      return () => {
+        window.removeEventListener('mousemove', handleGlobalMouseMove);
+        window.removeEventListener('mouseup', handleGlobalMouseUp);
+      };
+    }
+  }, [isDragging, isResizing, activeHandle, scale, slot, onUpdate]);
+
+  // Handle slot mouse down (drag)
+  const handleSlotMouseDown = (e: React.MouseEvent) => {
+    e.stopPropagation();
+
+    dragStartRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      slotX: slot.x,
+      slotY: slot.y,
+    };
+
+    setIsDragging(true);
+    onSelect();
+  };
+
   // Handle slot touch start (drag)
   const handleSlotTouchStart = (e: React.TouchEvent) => {
     e.stopPropagation();
@@ -53,6 +141,25 @@ export default function StreamSlot({
       setIsDragging(true);
       onSelect();
     }
+  };
+
+  // Handle resize handle mouse down
+  const handleResizeMouseDown = (handle: ResizeHandle) => (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+
+    resizeStartRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      slotX: slot.x,
+      slotY: slot.y,
+      slotWidth: slot.width,
+      slotHeight: slot.height,
+    };
+
+    setIsResizing(true);
+    setActiveHandle(handle);
+    onSelect();
   };
 
   // Handle resize handle touch start
@@ -176,6 +283,7 @@ export default function StreamSlot({
         userSelect: 'none',
         WebkitUserSelect: 'none',
       }}
+      onMouseDown={handleSlotMouseDown}
       onTouchStart={handleSlotTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
@@ -213,6 +321,7 @@ export default function StreamSlot({
               top: `-${handleOffset}px`,
               touchAction: 'none',
             }}
+            onMouseDown={handleResizeMouseDown('tl')}
             onTouchStart={handleResizeTouchStart('tl')}
           >
             <div className="w-5 h-5 rounded-full bg-white/90 backdrop-blur-sm shadow-lg border-2 border-primary/80 ring-2 ring-white/30" />
@@ -228,6 +337,7 @@ export default function StreamSlot({
               top: `-${handleOffset}px`,
               touchAction: 'none',
             }}
+            onMouseDown={handleResizeMouseDown('tr')}
             onTouchStart={handleResizeTouchStart('tr')}
           >
             <div className="w-5 h-5 rounded-full bg-white/90 backdrop-blur-sm shadow-lg border-2 border-primary/80 ring-2 ring-white/30" />
@@ -243,6 +353,7 @@ export default function StreamSlot({
               bottom: `-${handleOffset}px`,
               touchAction: 'none',
             }}
+            onMouseDown={handleResizeMouseDown('bl')}
             onTouchStart={handleResizeTouchStart('bl')}
           >
             <div className="w-5 h-5 rounded-full bg-white/90 backdrop-blur-sm shadow-lg border-2 border-primary/80 ring-2 ring-white/30" />
@@ -258,6 +369,7 @@ export default function StreamSlot({
               bottom: `-${handleOffset}px`,
               touchAction: 'none',
             }}
+            onMouseDown={handleResizeMouseDown('br')}
             onTouchStart={handleResizeTouchStart('br')}
           >
             <div className="w-5 h-5 rounded-full bg-white/90 backdrop-blur-sm shadow-lg border-2 border-primary/80 ring-2 ring-white/30" />
