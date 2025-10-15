@@ -3,7 +3,9 @@
 Multi-stream video composition with mobile-friendly control interface.
 
 ![Status](https://img.shields.io/badge/status-beta-yellow)
-![Platform](https://img.shields.io/badge/platform-linux-blue)
+![Docker](https://img.shields.io/badge/docker-ready-blue)
+![Next.js](https://img.shields.io/badge/Next.js-15-black)
+![FastAPI](https://img.shields.io/badge/FastAPI-Python-green)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ## Overview
