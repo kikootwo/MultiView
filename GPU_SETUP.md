@@ -10,7 +10,7 @@ This guide covers setting up NVIDIA GPU support for hardware-accelerated video e
 - **Lower latency**: Hardware encoding is faster than software
 - **Higher capacity**: Can encode more streams simultaneously
 
-Your **RTX 3090** supports up to **8 concurrent NVENC sessions** (consumer limit), perfect for MultiView's 5-stream max.
+The **RTX 3090** supports up to **8 concurrent NVENC sessions** (consumer limit), perfect for MultiView's 5-stream max.
 
 ## Prerequisites
 
@@ -73,7 +73,7 @@ Test that Docker can see your GPU:
 docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi
 ```
 
-Should display your RTX 3090 info.
+Should display the RTX 3090 info.
 
 ## MultiView Configuration
 
@@ -309,5 +309,3 @@ Or in FFmpeg command (edit server.py):
 Current limit is 5 streams (CPU constraint for layout management). If you upgrade the limit, NVENC can handle 8 simultaneous encodes on RTX 3090.
 
 ---
-
-**Your RTX 3090 is perfect for this!** You'll get excellent quality with minimal CPU usage. 🚀

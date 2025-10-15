@@ -2,14 +2,11 @@
 
 Get MultiView running in 5 minutes!
 
-## For Your Specific Setup
+## Prerequisites
 
-You mentioned:
-- M3U source: `http://127.0.0.1:9191/output/m3u?direct=true`
-- Running on a 24-core machine with NVIDIA RTX 3090
-- Want to access from mobile on local network
-
-**GPU Note**: Your setup uses NVIDIA hardware encoding (h264_nvenc) for better performance. See **[GPU_SETUP.md](GPU_SETUP.md)** if you encounter GPU-related issues.
+- Docker and docker-compose installed
+- M3U playlist source (URL or file)
+- Optional: NVIDIA GPU for hardware encoding (see **[GPU_SETUP.md](GPU_SETUP.md)**)
 
 ### Step 1: Configure M3U Source
 
@@ -28,24 +25,23 @@ Find the `M3U_SOURCE` line and update it:
 
 ### Step 2: Deploy Everything
 
-Run the automated deployment script:
+**Recommended:** Run the automated deployment script:
 
 ```bash
 ./deploy.sh
 ```
 
 This script will:
-1. Detect your server's IP address
-2. Create frontend configuration
-3. Build and start both backend and frontend
-4. Show you the access URLs
+1. Auto-detect your server's IP address
+2. Build and start both backend and frontend
+3. Display access URLs for local and mobile devices
 
-**Output will look like**:
+**Output:**
 ```
 Server IP: 192.168.1.100
-Frontend:   http://192.168.1.100:9393
-Backend:    http://192.168.1.100:9292
-HLS Stream: http://192.168.1.100:9292/hls/multiview.m3u8
+Frontend: http://192.168.1.100:9393
+Backend:  http://192.168.1.100:9292
+Stream:   http://192.168.1.100:9292/stream
 ```
 
 ### Step 3: Access from Mobile
@@ -68,16 +64,16 @@ On your phone or tablet:
 
 ### Step 5: Watch the Stream
 
-The output HLS stream is available at:
+The output MPEG-TS stream is available at:
 ```
-http://<YOUR_SERVER_IP>:9292/hls/multiview.m3u8
+http://<YOUR_SERVER_IP>:9292/stream
 ```
 
 Play it in:
 - **VLC**: Open Network Stream
-- **Browser**: Use hls.js player
-- **Mobile**: Safari (iOS) or Chrome (Android) natively support HLS
-- **TV App**: Any IPTV player
+- **Plex**: Add as Live TV tuner (HDHomeRun compatible)
+- **Browser**: Use video.js or native player
+- **TV App**: Any IPTV player that supports MPEG-TS
 
 ## Manual Deployment (Alternative)
 
@@ -110,12 +106,7 @@ docker logs -f multiview
 cd frontend
 npm install
 
-# Create environment file
-cat > .env.local <<EOF
-NEXT_PUBLIC_API_URL=http://$(hostname -I | awk '{print $1}'):9292
-EOF
-
-# Run development server
+# Run development server (frontend auto-detects backend)
 npm run dev
 
 # Or build for production
@@ -177,11 +168,10 @@ docker logs multiview
 
 ### Frontend can't connect
 ```bash
-# Check .env.local
-cat frontend/.env.local
-
-# Should contain your server IP, not localhost:
-# NEXT_PUBLIC_API_URL=http://192.168.1.100:9292
+# Frontend auto-detects API URL from hostname
+# Make sure you're accessing via server IP, not localhost:
+# ✓ http://192.168.1.100:9393 (works from mobile)
+# ✗ http://localhost:9393 (only works locally)
 ```
 
 ### Mobile can't access
@@ -207,10 +197,6 @@ docker logs -f multiview
 ```
 
 ## Next Steps
-
-- ✅ **Phase 1 Complete**: Channels loading, frontend working
-- 🚧 **Phase 2 Next**: Multi-layout support (currently only 2-stream PiP works)
-- 📋 **Phase 3 Future**: Seamless transitions, failure handling
 
 For detailed documentation:
 - **[README.md](README.md)** - Project overview

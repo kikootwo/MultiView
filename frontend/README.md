@@ -25,17 +25,9 @@ npm install
 
 ### Configuration
 
-Create a `.env.local` file:
-
-```bash
-cp .env.local.example .env.local
-```
-
-Edit `.env.local` and set your backend URL:
-
-```
-NEXT_PUBLIC_API_URL=http://localhost:9292
-```
+**No configuration needed!** The frontend automatically detects the backend URL from the current hostname:
+- `localhost:9393` → connects to `localhost:9292`
+- `192.168.1.100:9393` → connects to `192.168.1.100:9292`
 
 ### Development
 
@@ -97,10 +89,10 @@ The frontend expects these backend endpoints:
 - `POST /api/channels/refresh` - Refresh M3U
 - `POST /api/layout/set` - Apply layout configuration
 - `POST /api/layout/swap-audio` - Change audio source
+- `POST /api/audio/volume` - Set stream volume
+- `GET /api/audio/volumes` - Get current volumes
 - `GET /control/status` - Get system status
 - `GET /control/stop` - Stop streaming
-
-Note: These endpoints are not yet implemented in the backend (Phase 1 work).
 
 ## Tech Stack
 

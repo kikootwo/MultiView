@@ -4,9 +4,27 @@ This guide covers deploying MultiView backend and frontend for access from mobil
 
 ## Quick Start (Recommended)
 
-### Option 1: Docker Compose (Easiest)
+### Option 1: Automated Deployment (Easiest)
 
-Deploy both backend and frontend with a single command:
+Use the deployment script to automatically configure and start everything:
+
+```bash
+./deploy.sh
+```
+
+This script will:
+- Auto-detect your server IP (or prompt if needed)
+- Build and start both backend and frontend
+- Display access URLs for local and mobile devices
+
+**Access**:
+- Backend API: `http://<your-server-ip>:9292`
+- Frontend UI: `http://<your-server-ip>:9393`
+- Stream: `http://<your-server-ip>:9292/stream`
+
+### Option 2: Manual Docker Compose
+
+Deploy both services manually:
 
 ```bash
 # Build and start both services
@@ -19,12 +37,7 @@ docker-compose logs -f
 docker-compose down
 ```
 
-**Access**:
-- Backend API: `http://<your-server-ip>:9292`
-- Frontend UI: `http://<your-server-ip>:9393`
-- HLS Stream: `http://<your-server-ip>:9292/hls/multiview.m3u8`
-
-### Option 2: Backend Only (Docker) + Frontend (Local)
+### Option 3: Backend Only (Docker) + Frontend (Local)
 
 If you prefer to run the frontend locally during development:
 
@@ -62,19 +75,14 @@ Edit `docker-compose.yml` or pass via `-e` flags:
 | `FORCE_CPU` | `1` | Set to `0` to use GPU (requires NVIDIA GPU + drivers) |
 | `IDLE_TIMEOUT` | `300` | Seconds before switching to standby |
 | `PORT` | `9292` | Backend API port |
-| `HLS_TIME` | `1` | HLS segment duration (seconds) |
-| `HLS_LIST_SIZE` | `8` | Number of segments in playlist |
+| `HLS_TIME` | `2` | HLS segment duration (seconds, used for internal HLS chunks) |
+| `HLS_LIST_SIZE` | `10` | Number of segments in playlist |
 
 ### Frontend Environment Variables
 
-Create `frontend/.env.local`:
-
-```bash
-# Backend API URL (use your server's IP for mobile access)
-NEXT_PUBLIC_API_URL=http://192.168.1.100:9292
-```
-
-Replace `192.168.1.100` with your server's actual IP address.
+**None required!** The frontend auto-detects the backend URL from the current hostname:
+- Accessing via `localhost:9393` → connects to `localhost:9292`
+- Accessing via `192.168.1.100:9393` → connects to `192.168.1.100:9292`
 
 ## Mobile Access Setup
 
@@ -96,38 +104,15 @@ cat /etc/resolv.conf | grep nameserver | awk '{print $2}'
 ipconfig | findstr IPv4
 ```
 
-### Step 2: Update Frontend Configuration
-
-Edit `frontend/.env.local` (or `docker-compose.yml` if using Docker):
-
-```bash
-NEXT_PUBLIC_API_URL=http://<YOUR_SERVER_IP>:9292
-```
-
-Example:
-```bash
-NEXT_PUBLIC_API_URL=http://192.168.1.100:9292
-```
-
-### Step 3: Restart Services
+### Step 2: Deploy Services
 
 **Docker Compose**:
+
 ```bash
-docker-compose down
 docker-compose up -d --build
 ```
 
-**Manual**:
-```bash
-# Restart backend
-docker restart multiview
-
-# Restart frontend
-cd frontend
-npm run dev
-```
-
-### Step 4: Access from Mobile Device
+### Step 3: Access from Mobile Device
 
 On your phone/tablet, open browser and navigate to:
 
@@ -173,7 +158,7 @@ http://<YOUR_SERVER_IP>:9292/control/status
 - For local services, use `host.docker.internal` instead of `localhost` in M3U_SOURCE
 
 **Issue**: Frontend can't connect to backend on mobile
-- **Fix**: Ensure `NEXT_PUBLIC_API_URL` uses your server's IP, not `localhost`
+- **Fix**: Frontend auto-detects from hostname, ensure you're using server IP not localhost in URL bar
 - **Fix**: Check firewall allows port 9292
 
 **Issue**: WSL2 networking issues
@@ -237,11 +222,12 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
     }
 
-    # HLS streams
-    location /hls/ {
-        proxy_pass http://localhost:9292/hls/;
+    # Stream endpoint
+    location /stream {
+        proxy_pass http://localhost:9292/stream;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;
     }
 
     # Control endpoints
