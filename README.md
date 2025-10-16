@@ -28,16 +28,19 @@ Multi-stream video composition with mobile-friendly control interface.
 ### Prerequisites
 
 - Docker and docker-compose
-- **NVIDIA Container Toolkit** (for GPU encoding)
 - M3U playlist (URL or file)
-- **Recommended**: NVIDIA GPU (RTX 3090 or similar) for hardware encoding
-- **Alternative**: 4+ core CPU for software encoding (set FORCE_CPU=1)
+- **Optional Hardware Acceleration** (auto-detected):
+  - NVIDIA GPU (RTX/GTX 1000+) with **NVIDIA Container Toolkit**
+  - Intel CPU with QuickSync (6th gen+)
+  - AMD GPU with VAAPI (RX 400+)
+- **Fallback**: 4+ core CPU for software encoding (always available)
 
 ### Deploy with Docker
 
 ```bash
-# 1. Install NVIDIA Container Toolkit (one-time setup)
-# See GPU_SETUP.md for detailed instructions
+# 1. (Optional) Install hardware acceleration support
+# - NVIDIA: Install NVIDIA Container Toolkit - see GPU_SETUP.md
+# - Intel/AMD: No additional setup needed!
 
 # 2. Clone repository
 git clone <repo-url>
@@ -53,11 +56,11 @@ nano docker-compose.yml
 docker-compose up -d --build
 ```
 
-The deployment script will auto-detect your server IP and display access URLs.
+The deployment script will auto-detect your server IP and display access URLs. **Hardware encoder is automatically detected at startup** - check logs to see which encoder was selected (NVIDIA/Intel/AMD/CPU).
 
 **Quick Deploy**: Run `./deploy.sh` for automated setup, or see **[DEPLOY.md](DEPLOY.md)** for manual options.
 
-**GPU Setup**: See **[GPU_SETUP.md](GPU_SETUP.md)** for NVIDIA GPU configuration.
+**Hardware Setup**: See **[GPU_SETUP.md](GPU_SETUP.md)** for NVIDIA/Intel/AMD configuration details.
 
 ## Architecture
 
@@ -82,7 +85,8 @@ The deployment script will auto-detect your server IP and display access URLs.
 
 **Stack**:
 - Frontend: Next.js 15, TypeScript, Tailwind CSS
-- Backend: Python, FastAPI, FFmpeg 6.1
+- Backend: Python, FastAPI, FFmpeg 8.0
+- Encoding: Universal hardware support (NVIDIA/Intel/AMD) with CPU fallback
 - Streaming: MPEG-TS over HTTP (Plex/HDHomeRun compatible)
 
 ## Usage
@@ -117,10 +121,17 @@ Configure via `docker-compose.yml` or Docker `-e` flags:
 
 ```bash
 M3U_SOURCE=http://127.0.0.1:9191/output/m3u?direct=true  # M3U playlist URL
-FORCE_CPU=1                                              # CPU encoding (0 for GPU)
+ENCODER_PREFERENCE=auto                                  # Encoder: auto, nvidia, intel, amd, cpu
 IDLE_TIMEOUT=300                                         # Standby after 5 min idle
 PORT=9292                                                # Backend port
 ```
+
+**Hardware Encoding**: Universal image supports all encoder types
+- `auto` (default) - Auto-detect best available: nvidia > intel > amd > cpu
+- `nvidia` - Force NVIDIA NVENC (requires NVIDIA GPU + Container Toolkit)
+- `intel` - Force Intel QuickSync (requires Intel iGPU)
+- `amd` - Force AMD VAAPI (requires AMD GPU)
+- `cpu` - Force CPU encoding (libx264, always available)
 
 **Frontend:** No configuration needed! Auto-detects backend from current hostname.
 
@@ -176,6 +187,11 @@ MultiView/
 
 ## Troubleshooting
 
+**Check which encoder is being used**:
+- View startup logs: `docker-compose logs backend | grep "Encoder"`
+- Check status endpoint: `curl http://<server-ip>:9292/control/status` (see `encoder` field)
+- If not using desired encoder, check GPU_SETUP.md for configuration
+
 **Frontend can't connect to backend**:
 - Ensure you're accessing frontend via server IP (not `localhost`) from mobile
 - Verify firewall allows port 9292
@@ -185,6 +201,12 @@ MultiView/
 - Verify `M3U_SOURCE` is accessible
 - Check logs: `docker-compose logs backend`
 - Test M3U URL in browser
+
+**Hardware encoding not working**:
+- Check startup logs for encoder detection results
+- NVIDIA: Verify NVIDIA Container Toolkit is installed
+- Intel/AMD: Verify `/dev/dri` exists: `ls -la /dev/dri`
+- Force CPU encoding if needed: `ENCODER_PREFERENCE=cpu`
 
 **Mobile can't access**:
 - Ensure phone is on same network

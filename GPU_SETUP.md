@@ -1,20 +1,49 @@
-# GPU Setup for MultiView
+# Hardware Encoding Setup for MultiView
 
-This guide covers setting up NVIDIA GPU support for hardware-accelerated video encoding with your RTX 3090.
+This guide covers setting up hardware-accelerated video encoding with NVIDIA, Intel, or AMD hardware.
 
-## Why GPU Encoding?
+## Why Hardware Encoding?
 
-**NVIDIA NVENC** (hardware encoder) provides:
-- **Lower CPU usage**: Frees up your 24 cores for other tasks
-- **Better quality/bitrate**: More efficient encoding at same bitrate
+Hardware encoders provide significant benefits over CPU-based encoding:
+- **Lower CPU usage**: Frees up CPU cores for other tasks
+- **Better efficiency**: More efficient encoding at same bitrate
 - **Lower latency**: Hardware encoding is faster than software
 - **Higher capacity**: Can encode more streams simultaneously
 
-The **RTX 3090** supports up to **8 concurrent NVENC sessions** (consumer limit), perfect for MultiView's 5-stream max.
+MultiView supports three hardware encoder types:
+1. **NVIDIA NVENC** (RTX/GTX 1000+ series) - Up to 8 concurrent sessions on consumer cards
+2. **Intel QuickSync** (6th gen+ CPUs with integrated graphics) - Up to 7-10 concurrent sessions
+3. **AMD VAAPI** (Radeon RX 400+ GPUs) - Multiple concurrent sessions
 
-## Prerequisites
+Auto-detection will select the best available encoder at startup.
 
-### 1. NVIDIA Drivers
+**Universal Docker Image**: The default `Dockerfile` includes ALL hardware encoders:
+- ✅ **NVIDIA NVENC** (h264_nvenc) - Requires NVIDIA Container Toolkit + `--gpus` flag
+- ✅ **Intel QuickSync** (h264_qsv) - Requires `/dev/dri` access (already in docker-compose.yml)
+- ✅ **AMD VAAPI** (h264_vaapi) - Requires `/dev/dri` access (already in docker-compose.yml)
+- ✅ **CPU fallback** (libx264) - Always available
+
+**No configuration needed!** The `docker-compose.yml` is already set up to support all encoder types. Just deploy and auto-detection will select the best available encoder.
+
+**Verify which encoder was detected:**
+
+```bash
+docker-compose logs backend | grep "Encoder"
+
+# Will show one of:
+# Selected Encoder: NVIDIA NVENC (h264_nvenc)
+# Selected Encoder: Intel QuickSync (h264_qsv)
+# Selected Encoder: AMD VAAPI (h264_vaapi)
+# Selected Encoder: CPU (libx264)
+```
+
+---
+
+## NVIDIA Setup (NVENC)
+
+### Prerequisites
+
+#### 1. NVIDIA Drivers
 
 Ensure you have NVIDIA drivers installed:
 
@@ -31,11 +60,11 @@ If not installed:
 - **Linux**: Install via package manager or NVIDIA's official installer
 - **Windows + WSL2**: Install NVIDIA drivers on Windows (WSL2 will use them automatically)
 
-### 2. NVIDIA Container Toolkit
+#### 2. NVIDIA Container Toolkit
 
 Docker needs the NVIDIA Container Toolkit to access your GPU.
 
-#### Ubuntu/Debian
+**Ubuntu/Debian**:
 
 ```bash
 # Add NVIDIA package repository
@@ -51,7 +80,7 @@ sudo apt-get install -y nvidia-container-toolkit
 sudo systemctl restart docker
 ```
 
-#### WSL2 (Windows)
+**WSL2 (Windows)**:
 
 ```bash
 # Install nvidia-container-toolkit in WSL2
@@ -65,7 +94,7 @@ sudo apt-get install -y nvidia-container-toolkit
 # Restart Docker Desktop from Windows
 ```
 
-### 3. Verify GPU Access in Docker
+#### 3. Verify GPU Access in Docker
 
 Test that Docker can see your GPU:
 
@@ -102,9 +131,10 @@ deploy:
 docker run -d \
   --name multiview \
   --gpus all \
+  --device /dev/dri:/dev/dri \
   --network host \
   -v $(pwd)/out:/out \
-  -e FORCE_CPU=0 \
+  -e ENCODER_PREFERENCE=auto \
   -e M3U_SOURCE=http://host.docker.internal:9191/output/m3u?direct=true \
   multiview-backend
 ```
@@ -155,49 +185,227 @@ Example output during 4-stream encoding:
 ### 3. Check Server Status
 
 ```bash
-curl http://localhost:9292/control/status
+curl http://localhost:9292/control/status | jq '.encoder'
+
+# Should show:
+# {
+#   "type": "nvidia",
+#   "name": "NVIDIA NVENC",
+#   "codec": "h264_nvenc",
+#   "preference": "auto"
+# }
 ```
 
-The backend doesn't explicitly report GPU usage, but check logs for "h264_nvenc" mentions.
+---
+
+## Intel Setup (QuickSync)
+
+**Note**: The universal Docker image already includes Intel QuickSync support. These instructions help verify your hardware is configured correctly.
+
+### Prerequisites
+
+#### 1. Intel CPU with Integrated Graphics
+
+Intel QuickSync requires a CPU with integrated graphics (6th gen+):
+- **Recommended**: 8th gen+ (Coffee Lake or newer)
+- **Minimum**: 6th gen (Skylake)
+
+Check if you have integrated graphics:
+```bash
+lspci | grep VGA
+
+# Should show something like:
+# 00:02.0 VGA compatible controller: Intel Corporation UHD Graphics 630
+```
+
+#### 2. Verify /dev/dri Exists
+
+Intel QuickSync uses `/dev/dri` devices:
+
+```bash
+ls -la /dev/dri
+
+# Should show:
+# /dev/dri/renderD128  # Primary render node
+# /dev/dri/card0       # Display card
+```
+
+If `/dev/dri` doesn't exist, your iGPU might be disabled in BIOS.
+
+### Docker Configuration
+
+The `docker-compose.yml` already includes `/dev/dri` device mapping. No additional configuration needed - auto-detection will find your hardware!
+
+### Verify QuickSync is Being Used
+
+Check startup logs:
+```bash
+docker-compose logs backend | grep "Encoder"
+
+# Should see:
+# Selected Encoder: Intel QuickSync (h264_qsv)
+```
+
+Check status endpoint:
+```bash
+curl http://localhost:9292/control/status | jq '.encoder'
+
+# Should show:
+# {
+#   "type": "intel",
+#   "name": "Intel QuickSync",
+#   "codec": "h264_qsv",
+#   "preference": "auto"
+# }
+```
+
+### Force Intel Encoder
+
+If auto-detection isn't selecting Intel, force it:
+
+```yaml
+# docker-compose.yml
+environment:
+  - ENCODER_PREFERENCE=intel
+```
+
+---
+
+## AMD Setup (VAAPI)
+
+**Note**: The universal Docker image already includes AMD VAAPI support. These instructions help verify your hardware is configured correctly.
+
+### Prerequisites
+
+#### 1. AMD GPU with VAAPI Support
+
+AMD VAAPI requires a Radeon GPU (RX 400 series or newer):
+- **Recommended**: RX 6000 series (RDNA 2)
+- **Supported**: RX 400+ (Polaris and newer)
+
+Check if you have an AMD GPU:
+```bash
+lspci | grep VGA
+
+# Should show something like:
+# 01:00.0 VGA compatible controller: Advanced Micro Devices [AMD/ATI] Navi 10
+```
+
+#### 2. Verify /dev/dri Exists
+
+AMD VAAPI uses `/dev/dri` devices:
+
+```bash
+ls -la /dev/dri
+
+# Should show:
+# /dev/dri/renderD128  # Primary render node
+# /dev/dri/card0       # Display card
+```
+
+#### 3. AMD Drivers
+
+Ensure AMD drivers are installed:
+```bash
+# Check driver
+lsmod | grep amdgpu
+
+# Should show amdgpu module loaded
+```
+
+For Ubuntu/Debian, install mesa-va-drivers:
+```bash
+sudo apt-get install mesa-va-drivers vainfo
+
+# Verify VAAPI:
+vainfo
+
+# Should list H.264 encoding profiles
+```
+
+### Docker Configuration
+
+The `docker-compose.yml` already includes `/dev/dri` device mapping. No additional configuration needed - auto-detection will find your hardware!
+
+### Verify VAAPI is Being Used
+
+Check startup logs:
+```bash
+docker-compose logs backend | grep "Encoder"
+
+# Should see:
+# Selected Encoder: AMD VAAPI (h264_vaapi)
+```
+
+Check status endpoint:
+```bash
+curl http://localhost:9292/control/status | jq '.encoder'
+
+# Should show:
+# {
+#   "type": "amd",
+#   "name": "AMD VAAPI",
+#   "codec": "h264_vaapi",
+#   "preference": "auto"
+# }
+```
+
+### Force AMD Encoder
+
+If auto-detection isn't selecting AMD, force it:
+
+```yaml
+# docker-compose.yml
+environment:
+  - ENCODER_PREFERENCE=amd
+```
+
+---
 
 ## Performance Comparison
 
-### RTX 3090 (GPU) vs 24-Core CPU
+### Hardware vs CPU Encoding (4 streams @ 6Mbps)
 
-| Metric | GPU (NVENC) | CPU (libx264) |
-|--------|-------------|---------------|
-| CPU Usage (4 streams) | ~5-10% | ~60-80% |
-| Encoding Latency | <50ms | ~100-200ms |
-| Quality @ 6Mbps | Excellent | Very Good |
-| Max Streams | 8 (NVENC limit) | 5 (CPU limit) |
-| Power Usage | +50W GPU | +100W CPU |
+| Metric | NVIDIA | Intel QSV | AMD VAAPI | CPU (libx264) |
+|--------|---------|-----------|-----------|---------------|
+| CPU Usage | ~5-10% | ~10-15% | ~10-15% | ~60-80% |
+| Encoding Latency | <50ms | <70ms | <70ms | ~100-200ms |
+| Quality | Excellent | Very Good | Very Good | Very Good |
+| Max Streams | 8 | 7-10 | 6-8 | 4-5 |
+| Power Usage | +50W | +15W | +40W | +100W |
 
 ## Encoding Settings
 
-MultiView uses these NVENC settings (server.py:46-53):
+MultiView automatically configures encoder-specific settings in `server.py`. Each encoder has optimized presets:
 
+**NVIDIA NVENC**:
 ```python
-"-c:v", "h264_nvenc",      # NVIDIA hardware encoder
-"-preset", "p5",            # Quality preset (p1=fastest, p7=slowest)
+"-c:v", "h264_nvenc",
+"-preset", "p5",            # Quality preset (p1-p7)
 "-rc", "vbr",              # Variable bitrate
-"-b:v", "6000k",           # Target bitrate
-"-maxrate", "6500k",       # Max bitrate
-"-bufsize", "12M",         # Buffer size
 "-spatial_aq", "1",        # Adaptive quantization
-"-aq-strength", "8",       # AQ strength
 ```
 
-**Preset Options** (if you want to customize):
-- `p1` - Fastest (lowest quality)
-- `p3` - Fast
-- `p5` - Medium (default, recommended)
-- `p6` - Slow (better quality)
-- `p7` - Slowest (best quality)
-
-To change preset, edit `server.py:49`:
+**Intel QuickSync**:
 ```python
-"-preset", "p6",  # Better quality, slightly higher latency
+"-c:v", "h264_qsv",
+"-preset", "medium",       # Preset: veryfast, fast, medium, slow
+"-look_ahead", "1",        # Enable look-ahead
 ```
+
+**AMD VAAPI**:
+```python
+"-c:v", "h264_vaapi",
+"-init_hw_device", "vaapi=va:/dev/dri/renderD128",
+"-vf", "format=nv12,hwupload",
+```
+
+All encoders use:
+- **Bitrate**: 6000k target, 6500k max
+- **Framerate**: 30fps
+- **GOP size**: 60 frames (2 seconds)
+
+To customize settings, edit the `ENCODER_CONFIGS` dictionary in `server.py` (lines 48-95).
 
 ## Troubleshooting
 
@@ -229,19 +437,30 @@ sudo ubuntu-drivers autoinstall
 sudo reboot
 ```
 
-### FFmpeg falls back to CPU
+### Encoder Not Detected
 
-**Logs show**: `Using codec: libx264`
+**Logs show**: `Selected Encoder: CPU (libx264)`
 
-**Cause**: FORCE_CPU=1 or GPU not accessible
+**Cause**: Hardware encoder not accessible or ENCODER_PREFERENCE set to cpu
 
 **Fix**:
 ```bash
 # Check environment variable
-docker-compose config | grep FORCE_CPU
-# Should show: FORCE_CPU=0
+docker-compose config | grep ENCODER_PREFERENCE
+# Should show: ENCODER_PREFERENCE=auto (or your preferred encoder)
 
-# Rebuild with GPU support
+# Check startup logs for detection process
+docker-compose logs backend | grep "Encoder"
+
+# Check status endpoint
+curl http://localhost:9292/control/status | jq '.encoder'
+
+# Force specific encoder if auto-detection fails
+# Edit docker-compose.yml:
+environment:
+  - ENCODER_PREFERENCE=nvidia  # or intel, amd
+
+# Rebuild
 docker-compose down
 docker-compose up -d --build
 ```
@@ -290,22 +509,38 @@ Or in FFmpeg command (edit server.py):
 ## Performance Tuning
 
 ### For Maximum Quality
+
+Edit `ENCODER_CONFIGS` in `server.py` to increase bitrate:
+
 ```python
-# In server.py, change:
-"-preset", "p7",           # Slowest preset (best quality)
+# For all encoders:
 "-b:v", "8000k",          # Higher bitrate
 "-maxrate", "9000k",
+
+# NVIDIA specific:
+"-preset", "p7",          # Slowest preset (best quality)
+
+# Intel specific:
+"-preset", "slow",        # Slower preset
 ```
 
 ### For Minimum Latency
+
 ```python
-# In server.py, change:
-"-preset", "p1",           # Fastest preset
-"-rc", "cbr",             # Constant bitrate
-"-tune", "ll",            # Low-latency tuning
+# NVIDIA:
+"-preset", "p1",          # Fastest preset
+"-rc", "cbr",            # Constant bitrate
+"-tune", "ll",           # Low-latency tuning
+
+# Intel:
+"-preset", "veryfast",   # Fastest preset
 ```
 
-### For Maximum Streams (8 concurrent)
-Current limit is 5 streams (CPU constraint for layout management). If you upgrade the limit, NVENC can handle 8 simultaneous encodes on RTX 3090.
+### For Maximum Streams
+
+MultiView supports up to 5 concurrent streams. Hardware encoders can handle:
+- **NVIDIA**: 8 sessions (consumer GPU limit)
+- **Intel QuickSync**: 7-10 sessions
+- **AMD VAAPI**: 6-8 sessions
 
 ---

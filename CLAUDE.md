@@ -4,9 +4,9 @@
 
 ## Stack
 
-- **Backend**: FastAPI + Python 3, FFmpeg 6.1
+- **Backend**: FastAPI + Python 3, FFmpeg 8.0 (LinuxServer)
 - **Frontend**: Next.js 15 + TypeScript + Tailwind
-- **Video**: NVIDIA h264_nvenc (RTX 3090) or libx264 (CPU fallback)
+- **Video**: Universal hardware encoding (NVIDIA/Intel/AMD) with CPU fallback
 - **Output**: MPEG-TS over HTTP (for Plex LiveTV)
 - **Channels**: M3U playlist (local or remote)
 
@@ -24,7 +24,7 @@
 
 - `M3U_SOURCE` - URL or path to M3U (default: http://127.0.0.1:9191/output/m3u?direct=true)
 - `IDLE_TIMEOUT` - Seconds before standby (default: 60)
-- `FORCE_CPU` - 1 for CPU encoding, 0 for GPU (default: 0)
+- `ENCODER_PREFERENCE` - Encoder selection: auto, nvidia, intel, amd, cpu (default: auto)
 - `PORT` - Backend port (default: 9292)
 
 ## API Endpoints
@@ -63,6 +63,16 @@
 - Use `statusBarStyle: "default"` to avoid white bar
 - Set `viewportFit: "cover"` for notch support
 - Body background should match header color
+
+**Hardware Encoding:**
+- Single Docker image supports ALL encoders (NVIDIA/Intel/AMD/CPU)
+- Auto-detection at startup: nvidia > intel > amd > cpu
+- Logs full detection process for troubleshooting
+- Check active encoder via `GET /control/status` (encoder field)
+- Force specific encoder with `ENCODER_PREFERENCE` env var
+- NVIDIA requires `--gpus` flag + NVIDIA Container Toolkit
+- Intel/AMD require `/dev/dri` device access (already in docker-compose.yml)
+- Both can coexist - auto-detection picks best available
 
 ## Deployment
 

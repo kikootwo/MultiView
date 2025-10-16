@@ -28,7 +28,7 @@ IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "60"))
 DEFAULT_UA = os.getenv("DEFAULT_UA", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128 Safari/537.36")
 SOURCE_HEADERS = os.getenv("SOURCE_HEADERS", "")
 AUDIO_SOURCE = int(os.getenv("AUDIO_SOURCE", "0"))     # 0=IN1, 1=IN2, 2=mix
-FORCE_CPU = os.getenv("FORCE_CPU", "0") == "1"
+ENCODER_PREFERENCE = os.getenv("ENCODER_PREFERENCE", "auto").lower()
 INSET_SCALE = int(os.getenv("INSET_SCALE", "640"))
 INSET_MARGIN = int(os.getenv("INSET_MARGIN", "40"))
 STANDBY_LABEL = os.getenv("STANDBY_LABEL", "Standby")
@@ -41,6 +41,167 @@ M3U_SOURCE = os.getenv("M3U_SOURCE", "http://127.0.0.1:9191/output/m3u?direct=tr
 # Default: 500MB to prevent unbounded growth
 MAX_STREAM_SIZE = int(os.getenv("MAX_STREAM_SIZE", str(500 * 1024 * 1024)))
 # ------------------------------------------------
+
+# ========== Hardware Encoder Detection ==========
+
+# Encoder configurations with optimal settings for each hardware type
+ENCODER_CONFIGS = {
+    'nvidia': {
+        'name': 'NVIDIA NVENC',
+        'codec': 'h264_nvenc',
+        'test_args': ['-f', 'lavfi', '-i', 'nullsrc=s=256x256:d=0.1', '-c:v', 'h264_nvenc', '-f', 'null', '-'],
+        'encode_args': [
+            "-c:v", "h264_nvenc",
+            "-preset", "p5", "-rc", "vbr",
+            "-b:v", "6000k", "-maxrate", "6500k", "-bufsize", "12M",
+            "-spatial_aq", "1", "-aq-strength", "8",
+            "-pix_fmt", "yuv420p", "-r", "30", "-g", "60",
+        ]
+    },
+    'intel': {
+        'name': 'Intel QuickSync',
+        'codec': 'h264_qsv',
+        'test_args': ['-f', 'lavfi', '-i', 'nullsrc=s=256x256:d=0.1', '-c:v', 'h264_qsv', '-f', 'null', '-'],
+        'encode_args': [
+            "-c:v", "h264_qsv",
+            "-preset", "medium", "-look_ahead", "1",
+            "-b:v", "6000k", "-maxrate", "6500k", "-bufsize", "12M",
+            "-pix_fmt", "yuv420p", "-r", "30", "-g", "60",
+        ]
+    },
+    'amd': {
+        'name': 'AMD VAAPI',
+        'codec': 'h264_vaapi',
+        'test_args': ['-init_hw_device', 'vaapi=va:/dev/dri/renderD128', '-f', 'lavfi', '-i', 'nullsrc=s=256x256:d=0.1', '-vf', 'format=nv12,hwupload', '-c:v', 'h264_vaapi', '-f', 'null', '-'],
+        'encode_args': [
+            "-init_hw_device", "vaapi=va:/dev/dri/renderD128",
+            "-vf", "format=nv12,hwupload",
+            "-c:v", "h264_vaapi",
+            "-b:v", "6000k", "-maxrate", "6500k",
+            "-pix_fmt", "yuv420p", "-r", "30", "-g", "60",
+        ]
+    },
+    'cpu': {
+        'name': 'CPU (libx264)',
+        'codec': 'libx264',
+        'test_args': ['-f', 'lavfi', '-i', 'nullsrc=s=256x256:d=0.1', '-c:v', 'libx264', '-f', 'null', '-'],
+        'encode_args': [
+            "-c:v", "libx264",
+            "-preset", "veryfast", "-tune", "zerolatency",
+            "-b:v", "6000k", "-maxrate", "6500k", "-bufsize", "12M",
+            "-pix_fmt", "yuv420p", "-r", "30", "-g", "60",
+        ]
+    }
+}
+
+def test_encoder(encoder_type: str) -> bool:
+    """
+    Test if a specific encoder is available and functional.
+
+    Args:
+        encoder_type: One of 'nvidia', 'intel', 'amd', 'cpu'
+
+    Returns:
+        True if encoder works, False otherwise
+    """
+    if encoder_type not in ENCODER_CONFIGS:
+        return False
+
+    config = ENCODER_CONFIGS[encoder_type]
+    print(f"  Testing {config['name']} ({config['codec']})...")
+
+    try:
+        # Run a quick encoding test with null output
+        result = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-loglevel', 'error'] + config['test_args'],
+            capture_output=True,
+            timeout=5
+        )
+
+        if result.returncode == 0:
+            print(f"    ✓ {config['name']} is available and functional")
+            return True
+        else:
+            error_msg = result.stderr.decode('utf-8', errors='ignore').strip()
+            print(f"    ✗ {config['name']} test failed: {error_msg[:100]}")
+            return False
+
+    except subprocess.TimeoutExpired:
+        print(f"    ✗ {config['name']} test timed out")
+        return False
+    except FileNotFoundError:
+        print(f"    ✗ FFmpeg not found")
+        return False
+    except Exception as e:
+        print(f"    ✗ {config['name']} test error: {e}")
+        return False
+
+def detect_encoder() -> str:
+    """
+    Detect the best available hardware encoder based on ENCODER_PREFERENCE.
+
+    Returns:
+        encoder_type: One of 'nvidia', 'intel', 'amd', 'cpu'
+    """
+    print("=" * 60)
+    print("Hardware Encoder Detection")
+    print("=" * 60)
+    print(f"Preference: {ENCODER_PREFERENCE}")
+    print()
+
+    # Define fallback chain (preference order)
+    fallback_chain = ['nvidia', 'intel', 'amd', 'cpu']
+
+    # If user specified a preference (not auto), try that first
+    if ENCODER_PREFERENCE != 'auto':
+        if ENCODER_PREFERENCE in ENCODER_CONFIGS:
+            print(f"Testing user-specified encoder: {ENCODER_PREFERENCE}")
+            if test_encoder(ENCODER_PREFERENCE):
+                encoder_type = ENCODER_PREFERENCE
+                config = ENCODER_CONFIGS[encoder_type]
+                print()
+                print("=" * 60)
+                print(f"Selected Encoder: {config['name']} ({config['codec']})")
+                print("=" * 60)
+                print()
+                return encoder_type
+            else:
+                print(f"  User-specified encoder '{ENCODER_PREFERENCE}' is not available")
+                print(f"  Falling back to auto-detection...")
+                print()
+        else:
+            print(f"  Invalid encoder preference: '{ENCODER_PREFERENCE}'")
+            print(f"  Valid options: auto, nvidia, intel, amd, cpu")
+            print(f"  Falling back to auto-detection...")
+            print()
+
+    # Auto-detection: try each encoder in preference order
+    print("Auto-detecting available encoders...")
+    print()
+
+    for encoder_type in fallback_chain:
+        if test_encoder(encoder_type):
+            config = ENCODER_CONFIGS[encoder_type]
+            print()
+            print("=" * 60)
+            print(f"Selected Encoder: {config['name']} ({config['codec']})")
+            print("=" * 60)
+            print()
+            return encoder_type
+
+    # This should never happen since CPU always works, but just in case
+    print()
+    print("=" * 60)
+    print("WARNING: No encoders available! Defaulting to CPU")
+    print("=" * 60)
+    print()
+    return 'cpu'
+
+# Detect encoder at startup
+SELECTED_ENCODER = detect_encoder()
+SELECTED_ENCODER_CONFIG = ENCODER_CONFIGS[SELECTED_ENCODER]
+
+# ========== End Hardware Encoder Detection ==========
 
 PROC = None
 LOCK = threading.Lock()
@@ -276,21 +437,8 @@ def _headers_value():
     return SOURCE_HEADERS.replace("\\n", "\r\n") if SOURCE_HEADERS else ""
 
 def _gpu_or_cpu_parts():
-    if not FORCE_CPU:
-        return [
-            "-c:v", "h264_nvenc",
-            "-preset", "p5", "-rc", "vbr",
-            "-b:v", "6000k", "-maxrate", "6500k", "-bufsize", "12M",
-            "-spatial_aq", "1", "-aq-strength", "8",
-            "-pix_fmt", "yuv420p", "-r", "30", "-g", "60",
-        ]
-    else:
-        return [
-            "-c:v", "libx264",
-            "-preset", "veryfast", "-tune", "zerolatency",
-            "-b:v", "6000k", "-maxrate", "6500k", "-bufsize", "12M",
-            "-pix_fmt", "yuv420p", "-r", "30", "-g", "60",
-        ]
+    """Return FFmpeg encoder arguments based on detected hardware encoder."""
+    return SELECTED_ENCODER_CONFIG['encode_args']
 
 def _output_parts():
     """
@@ -972,6 +1120,12 @@ async def status():
         "connected_clients": client_count,
         "current_layout": current_layout,
         "last_layout": last_layout,  # Layout that will be restored on cold start
+        "encoder": {
+            "type": SELECTED_ENCODER,
+            "name": SELECTED_ENCODER_CONFIG['name'],
+            "codec": SELECTED_ENCODER_CONFIG['codec'],
+            "preference": ENCODER_PREFERENCE
+        },
         "stream_url": f"http://localhost:{port}/stream",
     }
 

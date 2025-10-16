@@ -26,7 +26,13 @@
       "Bash(npm install)",
       "Bash(npx next lint:*)",
       "Bash(git check-ignore:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(docker build:*)",
+      "Bash(docker run:*)",
+      "Bash(docker search:*)",
+      "Bash(docker inspect:*)",
+      "Bash(docker pull jrottenberg/ffmpeg:7.1-nvidia2204)",
+      "Bash(nvidia-smi dmon:*)"
     ],
     "deny": [],
     "ask": []

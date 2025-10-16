@@ -8,7 +8,7 @@ services:
       - "9292:9292"
     environment:
       - PORT=9292
-      - FORCE_CPU=0
+      - ENCODER_PREFERENCE=auto  # Options: auto, nvidia, intel, amd, cpu
       - M3U_SOURCE=http://host.docker.internal:9191/output/m3u?direct=true
       - IDLE_TIMEOUT=60
       - DEFAULT_UA=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
@@ -16,8 +16,11 @@ services:
       - HLS_LIST_SIZE=10
     volumes:
       - ./out:/out
+    # Intel/AMD hardware encoding support
+    devices:
+      - /dev/dri:/dev/dri
     restart: unless-stopped
-    # GPU support for NVIDIA hardware encoding
+    # NVIDIA GPU support (works alongside Intel/AMD - auto-detection picks best)
     deploy:
       resources:
         reservations:
