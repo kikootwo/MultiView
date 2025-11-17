@@ -105,7 +105,7 @@ Workflow: `.github/workflows/docker-publish.yml`
 - Multi-stage build (frontend + backend in single image)
 - Publishes to GitHub Container Registry (ghcr.io)
 - Tags: `latest`, `main`, `v*` (semantic versions)
-- Platform: linux/amd64
+- Platforms: linux/amd64, linux/arm64
 
 **Build Process**:
 1. Stage 1: Build Next.js frontend as static export
