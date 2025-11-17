@@ -39,6 +39,9 @@ RUN pip3 install --break-system-packages --no-cache-dir fastapi uvicorn[standard
 # Copy static frontend build from previous stage
 COPY --from=frontend-builder /app/frontend/out /app/static
 
+# Explicitly copy the custom favicon to ensure it's not overwritten by Next.js defaults
+COPY frontend/public/favicon.ico /app/static/favicon.ico
+
 # Environment variables with defaults
 ENV PORT=9292
 ENV ENCODER_PREFERENCE=auto

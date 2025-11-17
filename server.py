@@ -316,9 +316,6 @@ if os.path.exists(STATIC_DIR):
     if os.path.exists(next_static):
         app.mount("/_next", StaticFiles(directory=next_static), name="next_static")
 
-    # Serve other static assets at root
-    app.mount("/static-assets", StaticFiles(directory=STATIC_DIR, html=True), name="static_assets")
-
 @app.middleware("http")
 async def touch_last_hit(request: Request, call_next):
     global LAST_HIT
@@ -1669,7 +1666,7 @@ async def get_audio_volumes():
 # This must be at the end so API routes take precedence
 
 @app.get("/{full_path:path}")
-async def serve_frontend(full_path: str):
+async def serve_frontend(full_path: str, request: Request):
     """Serve frontend static files for unified build. Falls back to index.html for client-side routing."""
     if not os.path.exists(STATIC_DIR):
         raise HTTPException(status_code=404, detail="Frontend not available in this build")
@@ -1682,10 +1679,11 @@ async def serve_frontend(full_path: str):
         from starlette.responses import FileResponse
         return FileResponse(file_path)
 
-    # Otherwise serve index.html for client-side routing
-    index_path = os.path.join(STATIC_DIR, "index.html")
-    if os.path.exists(index_path):
-        from starlette.responses import FileResponse
-        return FileResponse(index_path)
+    # Otherwise serve index.html for client-side routing (but not for API routes)
+    if not full_path.startswith(("api/", "control/", "stream", "hls/")):
+        index_path = os.path.join(STATIC_DIR, "index.html")
+        if os.path.exists(index_path):
+            from starlette.responses import FileResponse
+            return FileResponse(index_path)
 
-    raise HTTPException(status_code=404, detail="Frontend not found")
+    raise HTTPException(status_code=404, detail="Not found")
