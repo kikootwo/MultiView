@@ -1,11 +1,16 @@
 version: '3.8'
 
 services:
-  backend:
-    build: .
-    container_name: multiview-backend
+  multiview:
+    # Use pre-built unified image from GitHub Container Registry
+    image: ghcr.io/kikootwo/multiview:latest
+    # To build locally instead, comment the line above and uncomment below:
+#    build:
+#      context: .
+#      dockerfile: Dockerfile.unified
+    container_name: multiview
     ports:
-      - "9292:9292"
+      - "9292:9292"  # Single port for both frontend and API
     environment:
       - PORT=9292
       - ENCODER_PREFERENCE=auto  # Options: auto, nvidia, intel, amd, cpu
@@ -30,17 +35,3 @@ services:
               capabilities: [gpu, video]
     extra_hosts:
       - "host.docker.internal:host-gateway"
-
-  frontend:
-    build: ./frontend
-    container_name: multiview-frontend
-    ports:
-      - "9393:9393"
-    environment:
-      # API URL is now dynamic (uses window.location.hostname on client side)
-      # No need to hardcode IP - works with localhost and LAN IP automatically
-      - PORT=9393
-      - HOSTNAME=0.0.0.0
-    depends_on:
-      - backend
-    restart: unless-stopped

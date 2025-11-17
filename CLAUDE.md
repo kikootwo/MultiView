@@ -76,6 +76,16 @@
 
 ## Deployment
 
+### Using Pre-built Image (Recommended)
+```bash
+# Pull and start (image pre-configured in docker-compose.yml)
+docker-compose pull
+docker-compose up -d
+
+# Access at http://<server-ip>:9292 (single port for frontend + API)
+```
+
+### Building Locally
 ```bash
 ./deploy.sh  # Auto-configures and starts
 ```
@@ -85,3 +95,21 @@ Or manually:
 docker-compose up -d --build
 docker-compose logs -f
 ```
+
+## CI/CD
+
+**GitHub Actions** automatically builds and publishes a unified Docker image on every push to `main`:
+- **Image**: `ghcr.io/kikootwo/multiview:latest`
+
+Workflow: `.github/workflows/docker-publish.yml`
+- Multi-stage build (frontend + backend in single image)
+- Publishes to GitHub Container Registry (ghcr.io)
+- Tags: `latest`, `main`, `v*` (semantic versions)
+- Platform: linux/amd64
+
+**Build Process**:
+1. Stage 1: Build Next.js frontend as static export
+2. Stage 2: Copy frontend build + setup FastAPI backend
+3. Result: Single image serving both on port 9292
+
+See [DOCKER_SETUP.md](DOCKER_SETUP.md) for detailed setup instructions.

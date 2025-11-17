@@ -308,6 +308,17 @@ class LayoutConfigModel(BaseModel):
 
 app.mount("/hls", StaticFiles(directory=OUTDIR), name="hls")
 
+# Mount frontend static files if they exist (unified build)
+STATIC_DIR = "/app/static"
+if os.path.exists(STATIC_DIR):
+    # Serve _next static assets
+    next_static = os.path.join(STATIC_DIR, "_next")
+    if os.path.exists(next_static):
+        app.mount("/_next", StaticFiles(directory=next_static), name="next_static")
+
+    # Serve other static assets at root
+    app.mount("/static-assets", StaticFiles(directory=STATIC_DIR, html=True), name="static_assets")
+
 @app.middleware("http")
 async def touch_last_hit(request: Request, call_next):
     global LAST_HIT
@@ -1050,21 +1061,6 @@ def boot():
     load_channels()  # Load channels on startup
     # Start in idle mode (no FFmpeg process until first client connects)
 
-@app.get("/")
-async def home(in1: str | None = None, in2: str | None = None):
-    if in1 and in2:
-        start_live(in1, in2)
-        return RedirectResponse(url="/stream", status_code=302)
-    return PlainTextResponse(
-        "Multiview PiP is running.\n\n"
-        "Start with:\n"
-        "  /control/start?in1=<url>&in2=<url>\n"
-        "Stop (to standby):\n"
-        "  /control/stop\n\n"
-        "Stream URL (for Plex LiveTV):\n"
-        "  /stream\n"
-    )
-
 @app.get("/control/start")
 async def control_start(in1: str, in2: str):
     start_live(in1, in2)
@@ -1668,3 +1664,28 @@ async def get_audio_volumes():
             "layout": CURRENT_LAYOUT.get("layout"),
             "streams": CURRENT_LAYOUT.get("streams", {}),
         }
+
+# ========== Frontend Serving (Catch-all for SPA) ==========
+# This must be at the end so API routes take precedence
+
+@app.get("/{full_path:path}")
+async def serve_frontend(full_path: str):
+    """Serve frontend static files for unified build. Falls back to index.html for client-side routing."""
+    if not os.path.exists(STATIC_DIR):
+        raise HTTPException(status_code=404, detail="Frontend not available in this build")
+
+    # Try to serve the requested file
+    file_path = os.path.join(STATIC_DIR, full_path)
+
+    # If it's a file and exists, serve it
+    if os.path.isfile(file_path):
+        from starlette.responses import FileResponse
+        return FileResponse(file_path)
+
+    # Otherwise serve index.html for client-side routing
+    index_path = os.path.join(STATIC_DIR, "index.html")
+    if os.path.exists(index_path):
+        from starlette.responses import FileResponse
+        return FileResponse(index_path)
+
+    raise HTTPException(status_code=404, detail="Frontend not found")

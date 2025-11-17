@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+*.md
+
+# Dependencies
+node_modules
+
+# Build artifacts
+.next/
+out/
+*.log
+
+# Testing
+coverage/
+.nyc_output/
+
+# Environment
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

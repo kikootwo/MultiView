@@ -1,0 +1,37 @@
+# Git
+.git
+.gitignore
+.github
+
+# Documentation
+*.md
+LICENSE
+docs/
+
+# Development files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Build artifacts
+out/
+*.log
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Frontend build artifacts (exclude these but not the source)
+frontend/node_modules
+frontend/.next
+frontend/out
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,58 @@
+# Multi-stage build for unified frontend + backend image
+# This single image contains both the Next.js frontend and FastAPI backend
+
+# ============= Stage 1: Build Frontend =============
+FROM node:18-alpine AS frontend-builder
+
+WORKDIR /app/frontend
+
+# Install dependencies
+COPY frontend/package*.json ./
+RUN npm ci
+
+# Copy frontend source and build as static export
+COPY frontend/ ./
+RUN npm run build
+
+# ============= Stage 2: Backend with Frontend =============
+FROM linuxserver/ffmpeg:latest
+
+# Universal FFmpeg build with ALL hardware encoders:
+# - NVIDIA NVENC (h264_nvenc)
+# - Intel QuickSync (h264_qsv via libvpl)
+# - AMD/Intel VAAPI (h264_vaapi)
+# - CPU (libx264)
+
+# Install Python and dependencies (bypass PEP 668 for container)
+RUN apt-get update \
+ && apt-get install -y python3 python3-pip fonts-dejavu-core curl \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy backend
+COPY server.py /app/server.py
+
+# Install Python dependencies
+RUN pip3 install --break-system-packages --no-cache-dir fastapi uvicorn[standard] pyzmq
+
+# Copy static frontend build from previous stage
+COPY --from=frontend-builder /app/frontend/out /app/static
+
+# Environment variables with defaults
+ENV PORT=9292
+ENV ENCODER_PREFERENCE=auto
+ENV M3U_SOURCE=http://127.0.0.1:9191/output/m3u?direct=true
+ENV IDLE_TIMEOUT=60
+
+# Expose single port for both API and frontend
+EXPOSE 9292
+
+# Clear the inherited entrypoint from linuxserver/ffmpeg
+ENTRYPOINT []
+
+# Hardware acceleration runtime requirements:
+# - NVIDIA: --gpus flag + NVIDIA Container Toolkit
+# - Intel/AMD: --device /dev/dri:/dev/dri
+# - CPU: No additional requirements (always available)
+CMD ["python3","-m","uvicorn","server:app","--host","0.0.0.0","--port","9292"]
